@@ -2,7 +2,7 @@ extern crate rustc_serialize;
 extern crate byteorder;
 
 use std::collections::BTreeMap;
-use std::io::{Read, Write, Cursor};
+use std::io::{Read, Write, Cursor, Seek};
 use self::byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use self::rustc_serialize::json::Json;
 
@@ -322,7 +322,7 @@ impl FLVTag {
 }
 
 impl FLVTag {
-    pub fn get_objects(&mut self) -> Vec<Json> {
+    pub fn get_objects(&self) -> Vec<Json> {
         assert_eq!(self.get_tag_type(), FLVTagType::TAG_TYPE_SCRIPTDATAOBJECT);
         let mut v: Vec<Json> = Vec::with_capacity(2);
         let mut handle = Cursor::new(&self.data[(TAG_HEADER_BYTE_COUNT as usize)..]);
@@ -341,7 +341,7 @@ impl FLVTag {
             }
             _len = c.position();
         }
-        self.set_data_size((_len - TAG_HEADER_BYTE_COUNT as u64) as u32);
+        self.set_data_size(_len as u32);
     }
 }
 
@@ -418,12 +418,12 @@ impl<R: Read> Iterator for FLVTagRead<R> {
     }
 }
 
-pub struct FLVTagWrite<W: Write> {
+pub struct FLVTagWrite<W: Write + Seek> {
     stream: W,
     position: u64,
 }
 
-impl<W: Write> FLVTagWrite<W> {
+impl<W: Write + Seek> FLVTagWrite<W> {
     pub fn new(w: W) -> FLVTagWrite<W> {
         FLVTagWrite::<W> {
             stream: w,
@@ -438,7 +438,24 @@ impl<W: Write> FLVTagWrite<W> {
 
     pub fn write_tag(&mut self, tag: &FLVTag) {
         tag.write(&mut self.stream);
+        // match tag.get_tag_type() {
+        //     FLVTagType::TAG_TYPE_SCRIPTDATAOBJECT => {
+        //         println!("write scriptdataobject {:?}", tag.get_objects());
+        //     },
+        //     _ => ()
+        // }
         self.position += tag.get_tag_size() as u64 + 4
+    }
+
+    pub fn write_meta_tag(&mut self, tag: &FLVTag) {
+        use std::io::SeekFrom::{Current, Start};
+
+        let current_pos = self.stream.seek(Current(0)).unwrap();
+        self.stream.seek(Start(MIN_FILE_HEADER_BYTE_COUNT as u64 + 4)).unwrap();
+        self.write_tag(tag);
+        if current_pos > self.get_position() {
+            self.stream.seek(Start(current_pos)).unwrap();
+        }
     }
 
     pub fn get_position(&self) -> u64 {
@@ -451,7 +468,7 @@ pub fn split_flv_by_min(times: &Vec<f64>, positions: &Vec<u64>, min: u64) -> Vec
     let min = min as f64;
     let mut vec = Vec::<(f64, u64, u64)>::new();
     let mut acc = 1;
-    let mut item_acc = 0;
+    let mut item_acc: i64 = -1;
 
     let f_time = times[1];
     let f_pos = positions[1];
@@ -460,18 +477,19 @@ pub fn split_flv_by_min(times: &Vec<f64>, positions: &Vec<u64>, min: u64) -> Vec
     for (&t, &p) in times.iter().zip(positions.iter()) {
         if t > (acc as f64) * min * 60.0 {
             vec.push((t, p, 0));
-            vec[acc - 1].2 = item_acc;
+            vec[acc - 1].2 = item_acc as u64;
             acc += 1;
             item_acc = 0;
         }
         item_acc += 1;
     }
-    vec[acc - 1].2 = item_acc;
+    vec[acc - 1].2 = item_acc as u64;
 
     let last_t = times[times.len() - 1];
     let last_result_t = vec[vec.len() - 1].0;
     if last_t - last_result_t < min * 60.0 / 2.0 {
-        vec.pop();
+        let (_, _, n) = vec.pop().unwrap();
+        vec[acc - 2].2 += n;
     }
     vec
 }
