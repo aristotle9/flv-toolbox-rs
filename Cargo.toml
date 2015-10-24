@@ -6,3 +6,8 @@ authors = ["aristotle9 <lanfan.1987@gmail.com>"]
 [dependencies]
 rustc-serialize = "0.3"
 byteorder = "0.3"
+xml-rs = "0.2"
+
+[[bin]]
+name = "flv-cutter"
+path = "src/main.rs"
