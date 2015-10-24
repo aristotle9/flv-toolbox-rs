@@ -9,5 +9,13 @@ byteorder = "0.3"
 xml-rs = "0.2"
 
 [[bin]]
-name = "flv-cutter"
-path = "src/main.rs"
+name = "flv-info"
+path = "src/flv-info.rs"
+
+[[bin]]
+name = "flv-split"
+path = "src/flv-split.rs"
+
+[[bin]]
+name = "flv-config"
+path = "src/flv-config.rs"

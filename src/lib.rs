@@ -206,7 +206,7 @@ pub enum FLVTagType {
 impl From<u8> for FLVTagType {
     fn from(t: u8) -> FLVTagType {
         use std;
-        
+
         let v: Vec<u8> = vec![8, 9, 18];
         if !v.contains(&t) {
             panic!(format!("unknown tagType: {}", t));
@@ -418,27 +418,59 @@ impl<R: Read> Iterator for FLVTagRead<R> {
     }
 }
 
+pub struct FLVTagWrite<W: Write> {
+    stream: W,
+    position: u64,
+}
+
+impl<W: Write> FLVTagWrite<W> {
+    pub fn new(w: W) -> FLVTagWrite<W> {
+        FLVTagWrite::<W> {
+            stream: w,
+            position: 0
+        }
+    }
+
+    pub fn write_header(&mut self, header: &FLVHeader) {
+        header.write(&mut self.stream);
+        self.position += MIN_FILE_HEADER_BYTE_COUNT as u64 + 4;
+    }
+
+    pub fn write_tag(&mut self, tag: &FLVTag) {
+        tag.write(&mut self.stream);
+        self.position += tag.get_tag_size() as u64 + 4
+    }
+
+    pub fn get_position(&self) -> u64 {
+        self.position
+    }
+}
+
 //按6分钟切割,计算分割点
-pub fn split_flv_6min(times: &Vec<f64>, positions: &Vec<u64>) -> Vec<(f64, u64, u64)> {
+pub fn split_flv_by_min(times: &Vec<f64>, positions: &Vec<u64>, min: u64) -> Vec<(f64, u64, u64)> {
+    let min = min as f64;
     let mut vec = Vec::<(f64, u64, u64)>::new();
     let mut acc = 1;
     let mut item_acc = 0;
+
+    let f_time = times[1];
+    let f_pos = positions[1];
+    vec.push((f_time, f_pos, 0));
+
     for (&t, &p) in times.iter().zip(positions.iter()) {
-        if t > (acc as f64) * 6.0 * 60.0 {
-            vec.push((t, p, item_acc));
+        if t > (acc as f64) * min * 60.0 {
+            vec.push((t, p, 0));
+            vec[acc - 1].2 = item_acc;
             acc += 1;
-            item_acc = 1;
+            item_acc = 0;
         }
-        else {
-            item_acc += 1;
-        }
+        item_acc += 1;
     }
-    if vec.len() == 0 {
-        return vec;
-    }
+    vec[acc - 1].2 = item_acc;
+
     let last_t = times[times.len() - 1];
     let last_result_t = vec[vec.len() - 1].0;
-    if last_t - last_result_t < 3.0 * 60.0 {
+    if last_t - last_result_t < min * 60.0 / 2.0 {
         vec.pop();
     }
     vec
