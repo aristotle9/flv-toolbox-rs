@@ -1,6 +1,7 @@
 #![feature(path_ext)]
 extern crate rustc_serialize;
 extern crate getopts;
+extern crate xml;
 
 use rustc_serialize::json::{Json, ToJson};
 use getopts::Options;
@@ -10,7 +11,7 @@ use lib::*;
 
 const PROGRAM_SIGN: &'static str = "modified by flv-split, 2015";
 
-fn flv_split(path: &String, min: u64, profix: &String, verbose: bool, config_path: &String) {
+fn flv_split(path: &String, min: u64, prefix: &String, verbose: bool, config_path: &String, url_prefix: &String) {
     use std::fs::File;
     use std::fs::PathExt;
     use std::path::Path;
@@ -20,7 +21,7 @@ fn flv_split(path: &String, min: u64, profix: &String, verbose: bool, config_pat
     if !path.exists() {
         panic!(format!("file dosen't exist: {}", path.display()));
     } else {
-        println!("begin to split flv {}. each file is {} min(s), with name {}[n].flv. partial config file is {}", path.display(), min, profix, config_path);
+        println!("begin to split flv {}. each file is {} min(s), with name {}[n].flv. partial config file is {}", path.display(), min, prefix, config_path);
     }
 
     let file = File::open(path).unwrap();
@@ -92,11 +93,11 @@ fn flv_split(path: &String, min: u64, profix: &String, verbose: bool, config_pat
         if seg_index < vec.len() as i64 - 1 && vec[(seg_index + 1) as usize].1 == position {
             //fillback metatag
             if tag_write.is_some() {
-                write_back_meta_tag(timestamp - time_offset, &mut metatag, times.as_ref().unwrap(), filepositions.as_ref().unwrap(), tag_write.as_mut().unwrap());
-                duration_filesize.push((timestamp - time_offset, tag_write.as_ref().unwrap().get_position()));
+                write_back_meta_tag(tag.as_ref().unwrap().get_timestamp() - time_offset, &mut metatag, times.as_ref().unwrap(), filepositions.as_ref().unwrap(), tag_write.as_mut().unwrap());
+                duration_filesize.push((tag.as_ref().unwrap().get_timestamp() - time_offset, tag_write.as_ref().unwrap().get_position()));
             }
             seg_index += 1;
-            let file_name = format!("{}{}.flv", profix, seg_index + 1);
+            let file_name = format!("{}{}.flv", prefix, seg_index + 1);
             tag_write = Some(FLVTagWrite::new(File::create(file_name).unwrap()));
             let tag_write = tag_write.as_mut().unwrap();
             let key_tag_len = (vec[seg_index as usize].2 + 1) as usize;
@@ -131,9 +132,10 @@ fn flv_split(path: &String, min: u64, profix: &String, verbose: bool, config_pat
     }
 
     //output partial config
-    let mut file = File::create(config_path).unwrap();
-    let config = duration_filesize.iter().map(|&(t, s)| (t.to_json(), s.to_json()).to_json()).collect::<Vec<Json>>();
-    file.write(format!("{}", rustc_serialize::json::as_pretty_json(&config.to_json())).as_bytes()).unwrap();
+    let mut file = File::create(config_path).unwrap_or_else(|e| {
+        panic!(format!("try to create config file {}, but {}", config_path, e))
+    });
+    write_flv_config(&mut file, &duration_filesize, &(0..vec.len()).map(|i| format!("{}{}.flv", prefix, i + 1)).collect(), timestamp, url_prefix);
 }
 
 fn print_usage(program: &str, opts: Options) {
@@ -147,8 +149,9 @@ fn main() {
 
     let mut opts = Options::new();
     opts.optflagopt("m", "min", "set the number of minutes for each part, default is 6", "MINS");
-    opts.optflagopt("p", "profix", "set the profix name of part, default is \"seg-\"", "PROFIX");
-    opts.optflagopt("c", "config", "set partial config file name, default is PROFIXconfig.json", "CONFIG");
+    opts.optflagopt("p", "prefix", "set the prefix name of part, default is \"seg-\"", "PREFIX");
+    opts.optflagopt("c", "config", "set partial config file name, default is PREFIXconfig.xml", "CONFIG");
+    opts.optflagopt("u", "url-prefix", "set url-prefix, default is none", "URL_PREFIX");
     opts.optflag("v", "verbose", "show more information");
     opts.optflag("h", "help", "print this help menu");
 
@@ -172,14 +175,21 @@ fn main() {
         Some(m_str) => std::str::FromStr::from_str(&m_str).unwrap(),
         _ => 6
     };
-    let profix = match matches.opt_default("p", "seg-") {
+    let prefix = match matches.opt_default("p", "seg-") {
         Some(s) => s,
         _ => {
             print_usage(&program, opts);
             return;
         }
     };
-    let config = match matches.opt_default("c", &format!("{}config.json", profix)) {
+    let config = match matches.opt_default("c", &format!("{}config.xml", prefix)) {
+        Some(c) => c,
+        _ => {
+            print_usage(&program, opts);
+            return;
+        }
+    };
+    let url_prefix = match matches.opt_default("u", "") {
         Some(c) => c,
         _ => {
             print_usage(&program, opts);
@@ -187,5 +197,5 @@ fn main() {
         }
     };
     let verbose = matches.opt_present("v");
-    flv_split(&input, min, &profix, verbose, &config);
+    flv_split(&input, min, &prefix, verbose, &config, &url_prefix);
 }

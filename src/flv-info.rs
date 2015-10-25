@@ -1,6 +1,7 @@
 #![feature(path_ext)]
 extern crate rustc_serialize;
 extern crate getopts;
+extern crate xml;
 
 use rustc_serialize::json::Json;
 use getopts::Options;

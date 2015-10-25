@@ -1,5 +1,6 @@
 extern crate rustc_serialize;
 extern crate byteorder;
+extern crate xml;
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write, Cursor, Seek};
@@ -497,4 +498,29 @@ pub fn split_flv_by_min(times: &Vec<f64>, positions: &Vec<u64>, min: u64) -> Vec
         vec[acc - 2].2 += n;
     }
     vec
+}
+
+pub fn write_flv_config<W: Write>(w: &mut W, info_vec: &Vec<(u64, u64)>, flvs: &Vec<String>, timelength: u64, url_prefix: &String) {
+    use std::borrow::Borrow;
+    use xml::writer::{EmitterConfig, XmlEvent};
+
+    let mut writer = EmitterConfig::new().perform_indent(true).create_writer(w);
+    writer.write::<XmlEvent>(XmlEvent::start_element("video").into()).expect("write xml error");
+        writer.write::<XmlEvent>(XmlEvent::start_element("timelength").into()).unwrap();
+            writer.write::<XmlEvent>(XmlEvent::from(timelength.to_string().borrow()).into()).unwrap();
+        writer.write::<XmlEvent>(XmlEvent::end_element().into()).unwrap();
+        for (path, &(t, s)) in flvs.iter().zip(info_vec.iter()) {
+            writer.write::<XmlEvent>(XmlEvent::start_element("durl").into()).unwrap();
+                writer.write::<XmlEvent>(XmlEvent::start_element("length").into()).unwrap();
+                    writer.write::<XmlEvent>(XmlEvent::from(t.to_string().borrow()).into()).unwrap();
+                writer.write::<XmlEvent>(XmlEvent::end_element().into()).unwrap();
+                writer.write::<XmlEvent>(XmlEvent::start_element("size").into()).unwrap();
+                    writer.write::<XmlEvent>(XmlEvent::from(s.to_string().borrow()).into()).unwrap();
+                writer.write::<XmlEvent>(XmlEvent::end_element().into()).unwrap();
+                writer.write::<XmlEvent>(XmlEvent::start_element("url").into()).unwrap();
+                    writer.write::<XmlEvent>(XmlEvent::cdata(format!("{}{}", url_prefix, path).borrow()).into()).unwrap();
+                writer.write::<XmlEvent>(XmlEvent::end_element().into()).unwrap();
+            writer.write::<XmlEvent>(XmlEvent::end_element().into()).unwrap();
+        }
+    writer.write::<XmlEvent>(XmlEvent::end_element().into()).unwrap();
 }
