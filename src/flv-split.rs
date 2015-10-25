@@ -1,21 +1,26 @@
 #![feature(path_ext)]
 extern crate rustc_serialize;
+extern crate getopts;
 
-use rustc_serialize::json::Json;
+use rustc_serialize::json::{Json, ToJson};
+use getopts::Options;
 
 mod lib;
 use lib::*;
 
-fn flv_split(path: &String, min: u64) {
+const PROGRAM_SIGN: &'static str = "modified by flv-split, 2015";
+
+fn flv_split(path: &String, min: u64, profix: &String, verbose: bool, config_path: &String) {
     use std::fs::File;
     use std::fs::PathExt;
     use std::path::Path;
+    use std::io::Write;
 
     let path = Path::new(path);
     if !path.exists() {
         panic!(format!("file dosen't exist: {}", path.display()));
     } else {
-        println!("start to split flv {}, each file has {}min(s)", path.display(), min);
+        println!("begin to split flv {}. each file is {} min(s), with name {}[n].flv. partial config file is {}", path.display(), min, profix, config_path);
     }
 
     let file = File::open(path).unwrap();
@@ -37,11 +42,15 @@ fn flv_split(path: &String, min: u64) {
     let filepositions = filepositions.iter().map(|val: &Json| {
         val.as_f64().unwrap() as u64
     }).collect::<Vec<u64>>();
-    for (i, (t, p)) in (0u32..).zip(times.iter().zip(filepositions.iter())) {
-        println!("{:3} {} {:8}", i, format_seconds_ms((t * 1000f64) as u64), p);
+    if verbose {
+        for (i, (t, p)) in (0u32..).zip(times.iter().zip(filepositions.iter())) {
+            println!("{:3} {} {:8}", i, format_seconds_ms((t * 1000f64) as u64), p);
+        }
     }
     let vec = split_flv_by_min(&times, &filepositions, min);
-    println!("{:?}", vec.iter().map(|&(t, p, n)| (format_seconds_ms((t * 1000f64) as u64), p, n)).collect::<Vec<(String, u64, u64)>>());
+    if verbose {
+        println!("{:?}", vec.iter().map(|&(t, p, n)| (format_seconds_ms((t * 1000f64) as u64), p, n)).collect::<Vec<(String, u64, u64)>>());
+    }
 
     let video_metatag = parser.next().unwrap();
     assert_eq!(video_metatag.get_tag_type(), FLVTagType::TAG_TYPE_VIDEO);
@@ -56,13 +65,17 @@ fn flv_split(path: &String, min: u64) {
     let mut seg_index: i64 = -1;
     let mut tag_write: Option<FLVTagWrite<File>> = None;
     let mut time_offset: u64 = 0;
+    let mut timestamp: u64 = 0;
     let mut tag_index: u64 = 0;
     let mut times: Option<Vec<u64>> = None;
     let mut filepositions: Option<Vec<u64>> = None;
+    let mut duration_filesize: Vec<(u64, u64)> = Vec::new();
 
-    fn write_back_meta_tag(metatag: &mut FLVTag, times: &Vec<u64>, filepositions: &Vec<u64>, tag_write: &mut FLVTagWrite<File>) {
+    fn write_back_meta_tag(duration: u64, metatag: &mut FLVTag, times: &Vec<u64>, filepositions: &Vec<u64>, tag_write: &mut FLVTagWrite<File>) {
         let mut metas = metatag.get_objects();
         {
+            metas[1].as_object_mut().unwrap().insert("duration".to_string(), Json::F64(duration as f64 / 1000.0));
+            metas[1].as_object_mut().unwrap().insert("metadatacreator".to_string(), PROGRAM_SIGN.to_string().to_json());
             let key_times = Json::Array(times.iter().map(|&t| Json::F64(t as f64 / 1000.0)).collect::<Vec<Json>>());
             let key_positions = Json::Array(filepositions.iter().map(|&p| Json::F64(p as f64)).collect::<Vec<Json>>());
             let keyframes = metas[1].as_object_mut().unwrap().get_mut("keyframes").unwrap().as_object_mut().unwrap();
@@ -79,10 +92,11 @@ fn flv_split(path: &String, min: u64) {
         if seg_index < vec.len() as i64 - 1 && vec[(seg_index + 1) as usize].1 == position {
             //fillback metatag
             if tag_write.is_some() {
-                write_back_meta_tag(&mut metatag, times.as_ref().unwrap(), filepositions.as_ref().unwrap(), tag_write.as_mut().unwrap());
+                write_back_meta_tag(timestamp - time_offset, &mut metatag, times.as_ref().unwrap(), filepositions.as_ref().unwrap(), tag_write.as_mut().unwrap());
+                duration_filesize.push((timestamp - time_offset, tag_write.as_ref().unwrap().get_position()));
             }
             seg_index += 1;
-            let file_name = format!("seg-{}.flv", seg_index + 1);
+            let file_name = format!("{}{}.flv", profix, seg_index + 1);
             tag_write = Some(FLVTagWrite::new(File::create(file_name).unwrap()));
             let tag_write = tag_write.as_mut().unwrap();
             let key_tag_len = (vec[seg_index as usize].2 + 1) as usize;
@@ -90,7 +104,7 @@ fn flv_split(path: &String, min: u64) {
             filepositions = Some(vec![0; key_tag_len]);
             tag_write.write_header(&parser.header);
             //modify metatag
-            write_back_meta_tag(&mut metatag, times.as_ref().unwrap(), filepositions.as_ref().unwrap(), tag_write);
+            write_back_meta_tag(0, &mut metatag, times.as_ref().unwrap(), filepositions.as_ref().unwrap(), tag_write);
             filepositions.as_mut().unwrap()[0] = tag_write.get_position();
             tag_write.write_tag(&video_metatag);
             tag_write.write_tag(&audio_metatag);
@@ -99,26 +113,79 @@ fn flv_split(path: &String, min: u64) {
         }
 
         if tag.is_none() {
-            write_back_meta_tag(&mut metatag, times.as_ref().unwrap(), filepositions.as_ref().unwrap(), tag_write.as_mut().unwrap());
+            write_back_meta_tag(timestamp - time_offset, &mut metatag, times.as_ref().unwrap(), filepositions.as_ref().unwrap(), tag_write.as_mut().unwrap());
+            duration_filesize.push((timestamp - time_offset, tag_write.as_ref().unwrap().get_position()));
             break;
         }
         let mut tag = tag.unwrap();
         //change tag timestamp
-        let timestamp = tag.get_timestamp() - time_offset;
-        tag.set_timestamp(timestamp);
+        timestamp = tag.get_timestamp();
+        tag.set_timestamp(timestamp - time_offset);
         if tag.get_tag_type() == FLVTagType::TAG_TYPE_VIDEO && tag.get_frame_type() == 1 {
             // println!("write keyframe tag {}/{}", tag_index, filepositions.as_ref().unwrap().len() - 1);
             filepositions.as_mut().unwrap()[tag_index as usize] = tag_write.as_ref().unwrap().get_position();
-            times.as_mut().unwrap()[tag_index as usize] = timestamp;
+            times.as_mut().unwrap()[tag_index as usize] = timestamp - time_offset;
             tag_index += 1;
         }
         tag_write.as_mut().unwrap().write_tag(&tag);
     }
+
+    //output partial config
+    let mut file = File::create(config_path).unwrap();
+    let config = duration_filesize.iter().map(|&(t, s)| (t.to_json(), s.to_json()).to_json()).collect::<Vec<Json>>();
+    file.write(format!("{}", rustc_serialize::json::as_pretty_json(&config.to_json())).as_bytes()).unwrap();
+}
+
+fn print_usage(program: &str, opts: Options) {
+    let brief = format!("Usage: {} FILE [options]", program);
+    print!("{}", opts.usage(&brief));
 }
 
 fn main() {
-    // let path = "/Users/lanfan/projects/as3-projects/videos/av2998818-4737635/4737635-1.flv";
-    let path = "/Users/lanfan/projects/as3-projects/videos/youku-1/0300010800561D2AD49F851468DEFEA585825F-9542-DC16-3713-AC06678EC8EB.flv".to_string();
-    let min = 1;
-    flv_split(&path, min);
+    let args: Vec<String> = std::env::args().collect();
+    let program = args[0].clone();
+
+    let mut opts = Options::new();
+    opts.optflagopt("m", "min", "set the number of minutes for each part, default is 6", "MINS");
+    opts.optflagopt("p", "profix", "set the profix name of part, default is \"seg-\"", "PROFIX");
+    opts.optflagopt("c", "config", "set partial config file name, default is PROFIXconfig.json", "CONFIG");
+    opts.optflag("v", "verbose", "show more information");
+    opts.optflag("h", "help", "print this help menu");
+
+    let matches = match opts.parse(&args[1..]) {
+        Ok(m) => m,
+        Err(f) => {
+            panic!(f.to_string())
+        }
+    };
+    if matches.opt_present("h") {
+        print_usage(&program, opts);
+        return;
+    }
+    let input = if !matches.free.is_empty() {
+        matches.free[0].clone()
+    } else {
+        print_usage(&program, opts);
+        return;
+    };
+    let min = match matches.opt_default("m", "6") {
+        Some(m_str) => std::str::FromStr::from_str(&m_str).unwrap(),
+        _ => 6
+    };
+    let profix = match matches.opt_default("p", "seg-") {
+        Some(s) => s,
+        _ => {
+            print_usage(&program, opts);
+            return;
+        }
+    };
+    let config = match matches.opt_default("c", &format!("{}config.json", profix)) {
+        Some(c) => c,
+        _ => {
+            print_usage(&program, opts);
+            return;
+        }
+    };
+    let verbose = matches.opt_present("v");
+    flv_split(&input, min, &profix, verbose, &config);
 }

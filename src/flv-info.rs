@@ -85,7 +85,7 @@ fn flv_info(path: &String, show_meta: bool, all_frame: bool) {
 }
 
 fn print_usage(program: &str, opts: Options) {
-    let brief = format!("Usage: {} [options] FILE", program);
+    let brief = format!("Usage: {} FILE [options]", program);
     print!("{}", opts.usage(&brief));
 }
 

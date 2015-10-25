@@ -453,8 +453,13 @@ impl<W: Write + Seek> FLVTagWrite<W> {
         let current_pos = self.stream.seek(Current(0)).unwrap();
         self.stream.seek(Start(MIN_FILE_HEADER_BYTE_COUNT as u64 + 4)).unwrap();
         self.write_tag(tag);
-        if current_pos > self.get_position() {
+        // position fix
+        let new_pos = self.stream.seek(Current(0)).unwrap();
+        if current_pos > new_pos {
             self.stream.seek(Start(current_pos)).unwrap();
+            self.position = current_pos;
+        } else {
+            self.position = new_pos;
         }
     }
 
