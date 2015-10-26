@@ -1,5 +1,5 @@
 [package]
-name = "amf"
+name = "flv-toolbox-rs"
 version = "0.1.0"
 authors = ["aristotle9 <lanfan.1987@gmail.com>"]
 
