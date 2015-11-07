@@ -42,11 +42,8 @@ fn flv_scan(file: &mut File, verbose: bool, min: u64, win: u64) -> Vec<(u64, u64
     for (i, pos) in filepositions.iter().enumerate() {
         file.seek(SeekFrom::Start(*pos)).expect("seek flv file err");
         let ktag = FLVTag::read(file).expect("read video keyframe err");
-        let atag = FLVTag::read(file).expect("read next auto tag err");
         let t1 = ktag.get_timestamp();
-        let t2 = if atag.get_tag_type() == FLVTagType::TAG_TYPE_AUDIO {
-            atag.get_timestamp()
-        } else {
+        let t2 = {
             let mut tag = FLVTag::read(file);
             while tag.is_some() && tag.as_ref().unwrap().get_tag_type() != FLVTagType::TAG_TYPE_AUDIO {
                 tag = FLVTag::read(file);
