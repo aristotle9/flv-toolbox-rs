@@ -376,17 +376,17 @@ impl FLVTag {
     }
 }
 
-pub struct FLVTagRead<R: Read> {
-    source: R,
+pub struct FLVTagRead<'a, R: Read + 'a> {
+    source: &'a mut R,
     pub header: FLVHeader,
     position: u64,
     finished: bool,
 }
 
-impl<R: Read> FLVTagRead<R> {
-    pub fn new(mut r: R) -> FLVTagRead<R> {
-        let header = FLVHeader::read(&mut r);
-        FLVTagRead::<R> {
+impl<'a, R: Read> FLVTagRead<'a, R> {
+    pub fn new(r: &'a mut R) -> FLVTagRead<'a, R> {
+        let header = FLVHeader::read(r);
+        FLVTagRead::<'a, R> {
             source: r,
             header: header,
             finished: false,
@@ -399,7 +399,7 @@ impl<R: Read> FLVTagRead<R> {
     }
 }
 
-impl<R: Read> Iterator for FLVTagRead<R> {
+impl<'a, R: Read + 'a> Iterator for FLVTagRead<'a, R> {
     type Item = FLVTag;
 
     fn next(&mut self) -> Option<FLVTag> {
@@ -407,7 +407,7 @@ impl<R: Read> Iterator for FLVTagRead<R> {
             None
         }
         else {
-            let tag = FLVTag::read(&mut self.source);
+            let tag = FLVTag::read(self.source);
             if tag.is_none() {
                 self.finished = true;
             }
@@ -470,31 +470,46 @@ impl<W: Write + Seek> FLVTagWrite<W> {
 }
 
 //按6分钟切割,计算分割点
-pub fn split_flv_by_min(times: &Vec<f64>, positions: &Vec<u64>, min: u64) -> Vec<(f64, u64, u64)> {
-    let min = min as f64;
-    let mut vec = Vec::<(f64, u64, u64)>::new();
-    let mut acc = 1;
+//infos timestamp delta position
+//return timestamp position keyframe_counts
+pub fn split_flv_by_min(infos: &Vec<(u64, u64, u64)>, min: u64, win_seconds: u64) -> Vec<(u64, u64, u64, u64)> {
+    let mut vec = Vec::<(u64, u64, u64, u64)>::new();
+    let mut acc: usize = 1;
     let mut item_acc: i64 = -1;
 
-    let f_time = times[1];
-    let f_pos = positions[1];
-    vec.push((f_time, f_pos, 0));
+    assert_eq!(infos[0].0, 0);
+    assert_eq!(infos[1].0, 0);
 
-    for (&t, &p) in times.iter().zip(positions.iter()) {
-        if t > (acc as f64) * min * 60.0 {
-            vec.push((t, p, 0));
-            vec[acc - 1].2 = item_acc as u64;
+    let f_time = infos[1].0;
+    let f_pos = infos[1].2;
+    vec.push((f_time, f_pos, 0, 0));
+
+    for (i, &(t, dt, _)) in infos.iter().enumerate() {
+        if t > (acc as u64) * min * 60 * 1000 {
+            let mut current_delta = dt;
+            let mut current_index = i;
+            let mut j = i;
+            while j < infos.len() && current_delta != 0 && infos[j].0 - t <= win_seconds * 1000 {
+                if infos[j].1 < current_delta {
+                    current_delta = infos[j].1;
+                    current_index = j;
+                }
+                j += 1;
+            }
+            let (t, _, p) = infos[current_index];
+            vec.push((t, p, 0, current_delta));
+            vec[acc - 1].2 = item_acc as u64 + (current_index - i) as u64;
             acc += 1;
-            item_acc = 0;
+            item_acc = 0 - (current_index - i) as i64;
         }
         item_acc += 1;
     }
     vec[acc - 1].2 = item_acc as u64;
 
-    let last_t = times[times.len() - 1];
+    let last_t = infos[infos.len() - 1].0;
     let last_result_t = vec[vec.len() - 1].0;
-    if last_t - last_result_t < min * 60.0 / 2.0 {
-        let (_, _, n) = vec.pop().unwrap();
+    if last_t - last_result_t < min * 60 * 1000 / 2 {
+        let (_, _, n, _) = vec.pop().unwrap();
         vec[acc - 2].2 += n;
     }
     vec

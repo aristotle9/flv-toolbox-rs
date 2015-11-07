@@ -3,6 +3,8 @@ extern crate rustc_serialize;
 extern crate getopts;
 extern crate xml;
 
+use std::fs::File;
+
 use rustc_serialize::json::{Json, ToJson};
 use getopts::Options;
 
@@ -11,11 +13,70 @@ use lib::*;
 
 const PROGRAM_SIGN: &'static str = "modified by flv-split, 2015";
 
-fn flv_split(path: &String, min: u64, prefix: &String, verbose: bool, config_path: &String, url_prefix: &String) {
+#[inline]
+fn delta(v1: u64, v2: u64) -> u64 {
+    if v1 >= v2 {
+        v1 - v2
+    } else {
+        v2 - v1
+    }
+}
+
+//扫描关键点的视频音频位置信息
+fn flv_scan(file: &mut File, verbose: bool, min: u64, win: u64) -> Vec<(u64, u64, u64, u64)> {//video offset, next audio offset, position
+    use std::io::SeekFrom;
+    use std::io::Seek;
+
+    let header = FLVHeader::read(file);
+    let mut metatag = FLVTag::read(file).expect("read meta tag err");
+    assert_eq!(metatag.get_tag_type(), FLVTagType::TAG_TYPE_SCRIPTDATAOBJECT);
+
+    let v = metatag.get_objects();
+    let _event_name = v[0].as_string().unwrap().to_string();
+    let filepositions = v[1].find_path(&["keyframes", "filepositions"]).unwrap().as_array().unwrap();
+    let filepositions = filepositions.iter().map(|val: &Json| {
+        val.as_f64().unwrap() as u64
+    }).collect::<Vec<u64>>();
+
+    let mut info_vec: Vec<(u64, u64, u64)> = Vec::with_capacity(filepositions.len());
+    for (i, pos) in filepositions.iter().enumerate() {
+        file.seek(SeekFrom::Start(*pos)).expect("seek flv file err");
+        let ktag = FLVTag::read(file).expect("read video keyframe err");
+        let atag = FLVTag::read(file).expect("read next auto tag err");
+        let t1 = ktag.get_timestamp();
+        let t2 = if atag.get_tag_type() == FLVTagType::TAG_TYPE_AUDIO {
+            atag.get_timestamp()
+        } else {
+            let mut tag = FLVTag::read(file);
+            while tag.is_some() && tag.as_ref().unwrap().get_tag_type() != FLVTagType::TAG_TYPE_AUDIO {
+                tag = FLVTag::read(file);
+            }
+            if tag.is_none() {
+                t1 + 100
+            } else {
+                tag.as_ref().unwrap().get_timestamp()
+            }
+        };
+        let dt = delta(t1, t2);
+        info_vec.push((t1, dt, *pos));
+        if verbose {
+            println!("{:3} {} {:8} {:8} {:8}", i, format_seconds_ms(t1), t1, dt, *pos);
+        }
+    }
+
+    let vec = split_flv_by_min(&info_vec, min, win);
+    if verbose {
+        println!("{:?}", vec.iter().map(|&(t, p, n, dt)| (format_seconds_ms(t), p, n, dt)).collect::<Vec<(String, u64, u64, u64)>>());
+    }
+
+    file.seek(SeekFrom::Start(0)).expect("flv seek err");
+    vec
+}
+
+fn flv_split(path: &String, min: u64, win: u64, prefix: &String, verbose: bool, config_path: &String, url_prefix: &String) {
     use std::fs::File;
     use std::fs::PathExt;
     use std::path::Path;
-    use std::io::Write;
 
     let path = Path::new(path);
     if !path.exists() {
@@ -24,34 +85,16 @@ fn flv_split(path: &String, min: u64, prefix: &String, verbose: bool, config_pat
         println!("begin to split flv {}. each file is {} min(s), with name {}[n].flv. partial config file is {}", path.display(), min, prefix, config_path);
     }
 
-    let file = File::open(path).unwrap();
+    let mut file = File::open(path).unwrap();
     let file_meta = file.metadata().unwrap();
     let file_size = file_meta.len();
     println!("file size: {}", file_size);
-    let mut parser = FLVTagRead::new(file);//header has read
+    //split config
+    let vec = flv_scan(&mut file, verbose, min, win);
 
-    //first tag
+    let mut parser = FLVTagRead::new(&mut file);//header has read
     let mut metatag = parser.next().unwrap();
     assert_eq!(metatag.get_tag_type(), FLVTagType::TAG_TYPE_SCRIPTDATAOBJECT);
-    let v = metatag.get_objects();
-    let _event_name = v[0].as_string().unwrap().to_string();
-    let times = v[1].find_path(&["keyframes", "times"]).unwrap().as_array().unwrap();
-    let times = times.iter().map(|val: &Json| {
-        val.as_f64().unwrap()
-    }).collect::<Vec<f64>>();
-    let filepositions = v[1].find_path(&["keyframes", "filepositions"]).unwrap().as_array().unwrap();
-    let filepositions = filepositions.iter().map(|val: &Json| {
-        val.as_f64().unwrap() as u64
-    }).collect::<Vec<u64>>();
-    if verbose {
-        for (i, (t, p)) in (0u32..).zip(times.iter().zip(filepositions.iter())) {
-            println!("{:3} {} {:8}", i, format_seconds_ms((t * 1000f64) as u64), p);
-        }
-    }
-    let vec = split_flv_by_min(&times, &filepositions, min);
-    if verbose {
-        println!("{:?}", vec.iter().map(|&(t, p, n)| (format_seconds_ms((t * 1000f64) as u64), p, n)).collect::<Vec<(String, u64, u64)>>());
-    }
 
     let video_metatag = parser.next().unwrap();
     assert_eq!(video_metatag.get_tag_type(), FLVTagType::TAG_TYPE_VIDEO);
@@ -149,6 +192,7 @@ fn main() {
 
     let mut opts = Options::new();
     opts.optflagopt("m", "min", "set the number of minutes for each part, default is 6", "MINS");
+    opts.optflagopt("w", "win", "set the number of seconds to search split point, default is 20", "WIN");
     opts.optflagopt("p", "prefix", "set the prefix name of part, default is \"seg-\"", "PREFIX");
     opts.optflagopt("c", "config", "set partial config file name, default is PREFIXconfig.xml", "CONFIG");
     opts.optflagopt("u", "url-prefix", "set url-prefix, default is none", "URL_PREFIX");
@@ -175,6 +219,10 @@ fn main() {
         Some(m_str) => std::str::FromStr::from_str(&m_str).unwrap(),
         _ => 6
     };
+    let win = match matches.opt_default("w", "20") {
+        Some(win_str) => std::str::FromStr::from_str(&win_str).unwrap(),
+        _ => 20
+    };
     let prefix = match matches.opt_default("p", "seg-") {
         Some(s) => s,
         _ => {
@@ -197,5 +245,5 @@ fn main() {
         }
     };
     let verbose = matches.opt_present("v");
-    flv_split(&input, min, &prefix, verbose, &config, &url_prefix);
+    flv_split(&input, min, win, &prefix, verbose, &config, &url_prefix);
 }

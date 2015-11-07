@@ -21,11 +21,11 @@ fn flv_info(path: &String, show_meta: bool, all_frame: bool) {
     else {
         println!("show info for {}", path.display());
     }
-    let file = File::open(path).unwrap();
+    let mut file = File::open(path).unwrap();
     let file_meta = file.metadata().unwrap();
     let file_size = file_meta.len();
     println!("file size: {}", file_size);
-    let mut parser = FLVTagRead::new(file);//header has read
+    let mut parser = FLVTagRead::new(&mut file);//header has read
 
     //first tag
     let mut metatag = parser.next().unwrap();
