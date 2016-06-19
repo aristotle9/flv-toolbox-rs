@@ -12,10 +12,10 @@ use lib::*;
 fn flv_info(path: &String, show_meta: bool, all_frame: bool) {
     use std::fs::File;
     use std::path::Path;
-    use std::fs::PathExt;
+    use std::fs;
 
     let path = Path::new(path);
-    if !path.exists() {
+    if fs::metadata(path).is_err() {
         panic!(format!("file dosen't exist: {}", path.display()));
     }
     else {

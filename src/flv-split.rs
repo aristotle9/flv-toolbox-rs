@@ -72,11 +72,11 @@ fn flv_scan(file: &mut File, verbose: bool, min: u64, win: u64) -> Vec<(u64, u64
 
 fn flv_split(path: &String, min: u64, win: u64, prefix: &String, verbose: bool, config_path: &String, url_prefix: &String) {
     use std::fs::File;
-    use std::fs::PathExt;
+    use std::fs;
     use std::path::Path;
 
     let path = Path::new(path);
-    if !path.exists() {
+    if fs::metadata(path).is_err() {
         panic!(format!("file dosen't exist: {}", path.display()));
     } else {
         println!("begin to split flv {}. each file is {} min(s), with name {}[n].flv. partial config file is {}", path.display(), min, prefix, config_path);
