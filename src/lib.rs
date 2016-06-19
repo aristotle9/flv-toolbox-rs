@@ -515,27 +515,82 @@ pub fn split_flv_by_min(infos: &Vec<(u64, u64, u64)>, min: u64, win_seconds: u64
     vec
 }
 
-pub fn write_flv_config<W: Write>(w: &mut W, info_vec: &Vec<(u64, u64)>, flvs: &Vec<String>, timelength: u64, url_prefix: &String) {
-    use std::borrow::Borrow;
-    use xml::writer::{EmitterConfig, XmlEvent};
+macro_rules! write_xml {
+    ($w:expr, $($rest: tt)*) => {{
+        use std::borrow::Borrow;
+        use xml::writer::{EmitterConfig, XmlEvent};
 
-    let mut writer = EmitterConfig::new().perform_indent(true).create_writer(w);
-    writer.write::<XmlEvent>(XmlEvent::start_element("video").into()).expect("write xml error");
-        writer.write::<XmlEvent>(XmlEvent::start_element("timelength").into()).unwrap();
-            writer.write::<XmlEvent>(XmlEvent::from(timelength.to_string().borrow()).into()).unwrap();
-        writer.write::<XmlEvent>(XmlEvent::end_element().into()).unwrap();
-        for (path, &(t, s)) in flvs.iter().zip(info_vec.iter()) {
-            writer.write::<XmlEvent>(XmlEvent::start_element("durl").into()).unwrap();
-                writer.write::<XmlEvent>(XmlEvent::start_element("length").into()).unwrap();
-                    writer.write::<XmlEvent>(XmlEvent::from(t.to_string().borrow()).into()).unwrap();
-                writer.write::<XmlEvent>(XmlEvent::end_element().into()).unwrap();
-                writer.write::<XmlEvent>(XmlEvent::start_element("size").into()).unwrap();
-                    writer.write::<XmlEvent>(XmlEvent::from(s.to_string().borrow()).into()).unwrap();
-                writer.write::<XmlEvent>(XmlEvent::end_element().into()).unwrap();
-                writer.write::<XmlEvent>(XmlEvent::start_element("url").into()).unwrap();
-                    writer.write::<XmlEvent>(XmlEvent::cdata(format!("{}{}", url_prefix, path).borrow()).into()).unwrap();
-                writer.write::<XmlEvent>(XmlEvent::end_element().into()).unwrap();
-            writer.write::<XmlEvent>(XmlEvent::end_element().into()).unwrap();
+        let mut w1 = EmitterConfig::new().perform_indent(true).create_writer($w);
+        _write_xml!(w1, $($rest)* );
+    }}
+}
+
+macro_rules! _write_xml {
+    ($w:expr, ) => (());
+    ($w:expr, $e:tt) => {
+        $w.write::<XmlEvent>(XmlEvent::from(format!("{}", $e).borrow()).into()).unwrap();
+    };
+    ($w:expr, format!($($e: expr),*)) => {
+        $w.write::<XmlEvent>(XmlEvent::from(format!($($e),*).borrow()).into()).unwrap();
+    };
+    ($w:expr, $tag:ident { $($inner: tt)* } $($rest: tt)* ) => {
+        $w.write::<XmlEvent>(XmlEvent::start_element(stringify!($tag)).into()).unwrap();
+        _write_xml!($w, $($inner)*);
+        $w.write::<XmlEvent>(XmlEvent::end_element().into()).unwrap();
+        _write_xml!($w, $($rest)*);
+    };
+    ($w:expr, for $pat: pat in $expr: expr, { $($inner: tt)* } $($rest: tt)* ) => {
+        for $pat in $expr {
+            _write_xml!($w, $($inner)*);
         }
-    writer.write::<XmlEvent>(XmlEvent::end_element().into()).unwrap();
+        _write_xml!($w, $($rest)*);
+    }
+}
+
+pub fn write_flv_config<W: Write>(w: &mut W, info_vec: &Vec<(u64, u64)>, flvs: &Vec<String>, timelength: u64, url_prefix: &String) {
+    write_xml!(w,
+        video {
+            timelength { timelength }
+            for (path, &(t, s)) in flvs.iter().zip(info_vec.iter()), {
+                durl {
+                    length { t }
+                    size { s }
+                    url { format!("{}{}", url_prefix, path) }
+                }
+            }
+        }
+    );
+}
+
+#[test]
+fn test_config() {
+    use std::io::stdout;
+
+    let info_vec = vec![(1, 1), (2, 2)];
+    let flvs = vec!["1.flv".to_string(), "1.flv".to_string()];
+    let timelength = 60;
+    let url_prefix = "http://localhost/".to_string();
+
+    let mut w = stdout();
+    write_flv_config(&mut w, &info_vec, &flvs, timelength, &url_prefix);
+}
+
+#[test]
+fn test_xml() {
+    use std::io::stdout;
+
+    let w = stdout();
+    write_xml!(w,
+        video {
+            timelength { 1000 }
+            for i in 0..2, {
+                durl {
+                    id { i }
+                    length { 20 }
+                    size { 30 }
+                    url { "http://localhost/a.flv" }
+                }
+            }
+        }
+    );
 }
