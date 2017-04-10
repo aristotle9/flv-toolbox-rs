@@ -9,6 +9,9 @@ use getopts::Options;
 mod lib;
 use lib::*;
 
+mod crc32;
+use crc32::Crc32;
+
 fn print_metatag(json: &Json) -> Result<(), Option<String>> {
     let event_name = json.as_array().ok_or(None)?[0].as_string().ok_or(None)?;
     let obj = &json.as_array().ok_or(None)?[1];
@@ -48,7 +51,7 @@ fn flv_info(path: &String, show_meta: bool, all_frame: bool) {
     let mut parser = FLVTagRead::new(&mut file);//header has read
 
     println!("\r\ntags:", );
-    let mut i = 1;
+    let mut i = 0;
     loop {
         let position = parser.get_position();
         let tag = parser.next();
@@ -102,6 +105,7 @@ fn main() {
     opts.optflag("m", "meta", "show metadata");
     opts.optflag("a", "all", "print all frames");
     opts.optflag("h", "help", "print this help menu");
+    opts.optflag("c", "crc32", "calculate crc32 of tags");
 
     let matches = match opts.parse(&args[1..]) {
         Ok(m) => m,
@@ -121,5 +125,65 @@ fn main() {
     };
     let show_meta = matches.opt_present("m");
     let all_frame = matches.opt_present("a");
-    flv_info(&input, show_meta, all_frame);
+    let crc32_file = matches.opt_present("c");
+    if crc32_file {
+        flv_crc32(&input);
+    } else {
+        flv_info(&input, show_meta, all_frame);
+    }
+}
+
+fn flv_crc32(path: &String) {
+    use std::fs::File;
+    use std::io::Write;
+
+    let mut file = File::open(&path).unwrap();
+    let mut parser = FLVTagRead::new(&mut file);
+
+    let mut i = 0;
+    let mut key_time: f64 = 0f64;
+    let mut key_pos: u64 = 0;
+    let mut tmp: Vec<u32> = Vec::new();
+    let mut ret: Vec<Json> = Vec::new();
+    loop {
+        let position = parser.get_position();
+        let tag = parser.next();
+        if tag.is_none() {
+            break;
+        }
+
+        let tag = tag.unwrap();
+        let mut bytes: Vec<u8> = Vec::with_capacity(tag.get_tag_size() as usize);
+        tag.write(&mut bytes);
+        let mut hash = Crc32::new();
+        hash.update(&bytes);
+        let crc32_hash: u32 = hash.finish();
+        if tag.get_tag_type() == FLVTagType::TAG_TYPE_VIDEO && tag.get_frame_type() == 1 {
+            if tmp.len() > 0 {
+                ret.push(output_info(key_pos, key_time, &mut tmp));
+            }
+            key_pos = position;
+            key_time = tag.get_timestamp() as f64 / 1000f64;
+        }
+        tmp.push(crc32_hash);
+    }
+    if tmp.len() > 0 {
+        ret.push(output_info(key_pos, key_time, &mut tmp));
+    }
+
+    // println!("{}", rustc_serialize::json::as_pretty_json(&Json::Array(ret)));
+    let output_path = format!("{}{}", path, ".crc32.json");
+    let mut output_file = File::create(output_path).unwrap();
+    write!(output_file, "{}", rustc_serialize::json::as_pretty_json(&Json::Array(ret)));
+}
+
+fn output_info(key_pos: u64, key_time: f64, crc_list: &mut Vec<u32>) -> Json {
+    use std::collections::BTreeMap;
+
+    let mut obj: BTreeMap<String, Json> = BTreeMap::new();
+    obj.insert("offset".to_string(), Json::U64(key_pos));
+    obj.insert("time".to_string(), Json::F64(key_time));
+    obj.insert("tags".to_string(), Json::Array(crc_list.iter().map(|i| Json::U64(*i as u64)).collect()));
+    crc_list.clear();
+    Json::Object(obj)
 }
