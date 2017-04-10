@@ -9,6 +9,26 @@ use getopts::Options;
 mod lib;
 use lib::*;
 
+fn print_metatag(json: &Json) -> Result<(), Option<String>> {
+    let event_name = json.as_array().ok_or(None)?[0].as_string().ok_or(None)?;
+    let obj = &json.as_array().ok_or(None)?[1];
+    let times = obj.find_path(&["keyframes", "times"]).ok_or(None)?.as_array().ok_or(None)?;
+    let times: Vec<f64> = times.iter().map(|val: &Json| {
+        val.as_f64().unwrap()
+    }).collect();
+    let filepositions = obj.find_path(&["keyframes", "filepositions"]).ok_or(None)?.as_array().ok_or(None)?;
+    let filepositions: Vec<u64> = filepositions.iter().map(|val: &Json| {
+        val.as_f64().unwrap() as u64
+    }).collect();
+
+    println!("metadata: {}", event_name);
+    println!("{}", rustc_serialize::json::as_pretty_json(&obj));
+    for (i, (t, p)) in (0u32..).zip(times.iter().zip(filepositions.iter())) {
+        println!("{:3} {} {:8}", i, format_seconds_ms((t * 1000f64) as u64), p);
+    }
+    Ok(())
+}
+
 fn flv_info(path: &String, show_meta: bool, all_frame: bool) {
     use std::fs::File;
     use std::path::Path;
@@ -27,28 +47,7 @@ fn flv_info(path: &String, show_meta: bool, all_frame: bool) {
     println!("file size: {}", file_size);
     let mut parser = FLVTagRead::new(&mut file);//header has read
 
-    //first tag
-    let mut metatag = parser.next().unwrap();
-    assert_eq!(metatag.get_tag_type(), FLVTagType::TAG_TYPE_SCRIPTDATAOBJECT);
-    let v = metatag.get_objects();
-    let _event_name = v[0].as_string().unwrap().to_string();
-    let times = v[1].find_path(&["keyframes", "times"]).unwrap().as_array().unwrap();
-    let times = times.iter().map(|val: &Json| {
-        val.as_f64().unwrap()
-    }).collect::<Vec<f64>>();
-    let filepositions = v[1].find_path(&["keyframes", "filepositions"]).unwrap().as_array().unwrap();
-    let filepositions = filepositions.iter().map(|val: &Json| {
-        val.as_f64().unwrap() as u64
-    }).collect::<Vec<u64>>();
-
-    if show_meta {
-        println!("metadata:");
-        println!("{}", rustc_serialize::json::as_pretty_json(&v[1]));
-        for (i, (t, p)) in (0u32..).zip(times.iter().zip(filepositions.iter())) {
-            println!("{:3} {} {:8}", i, format_seconds_ms((t * 1000f64) as u64), p);
-        }
-    }
-    println!("\r\nframes:", );
+    println!("\r\ntags:", );
     let mut i = 1;
     loop {
         let position = parser.get_position();
@@ -79,7 +78,12 @@ fn flv_info(path: &String, show_meta: bool, all_frame: bool) {
                 }
             },
             FLVTagType::TAG_TYPE_SCRIPTDATAOBJECT => {
-                panic!("more than one metatag!");
+                if show_meta {
+                    print_metatag(&Json::Array(tag.get_objects()));
+                } else {
+                    println!("metatag");
+                }
+                i += 1;
             }
         };
     }
