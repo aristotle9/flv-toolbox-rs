@@ -179,11 +179,16 @@ fn flv_crc32(path: &String) {
 
 fn output_info(key_pos: u64, key_time: f64, crc_list: &mut Vec<u32>) -> Json {
     use std::collections::BTreeMap;
+    let mut arr: Vec<Json> = 
+        vec![("time"  , Json::F64(key_time)),
+             ("offset", Json::U64(key_pos)),
+             ("tags"  , Json::Array(crc_list.iter().map(|i| Json::U64(*i as u64)).collect()))]
+            .into_iter().map(|(key, json)| {
+                let mut obj: BTreeMap<String, Json> = BTreeMap::new();
+                obj.insert(key.to_string(), json);
+                Json::Object(obj)
+            }).collect();
 
-    let mut obj: BTreeMap<String, Json> = BTreeMap::new();
-    obj.insert("offset".to_string(), Json::U64(key_pos));
-    obj.insert("time".to_string(), Json::F64(key_time));
-    obj.insert("tags".to_string(), Json::Array(crc_list.iter().map(|i| Json::U64(*i as u64)).collect()));
     crc_list.clear();
-    Json::Object(obj)
+    Json::Array(arr)
 }
