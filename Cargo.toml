@@ -8,6 +8,7 @@ rustc-serialize = "0.3"
 byteorder = "0.3"
 xml-rs = "0.2"
 getopts = "0.2"
+colored = "^1.5"
 
 [[bin]]
 name = "flv-info"

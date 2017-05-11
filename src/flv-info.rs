@@ -2,7 +2,9 @@
 extern crate rustc_serialize;
 extern crate getopts;
 extern crate xml;
+extern crate colored;
 
+use colored::*;
 use rustc_serialize::json::Json;
 use getopts::Options;
 
@@ -32,7 +34,7 @@ fn print_metatag(json: &Json) -> Result<(), Option<String>> {
     Ok(())
 }
 
-fn flv_info(path: &String, show_meta: bool, all_frame: bool) {
+fn flv_info(path: &String, show_meta: bool, all_frame: bool, video_frame: bool, audio_frame: bool) {
     use std::fs::File;
     use std::path::Path;
     use std::fs;
@@ -50,8 +52,11 @@ fn flv_info(path: &String, show_meta: bool, all_frame: bool) {
     println!("file size: {}", file_size);
     let mut parser = FLVTagRead::new(&mut file);//header has read
 
-    println!("\r\ntags:", );
+    println!("\r\ntags: kf: key_frame cd: codec_id pt: packet_type", );
+    println!("{:>6} | {:>10} | {:>10} | {:>6} | {:>4} | {:>2} | {:>2} | {:>2} | {:>4} | {:>6} | {:>6} | {:>6}", "id", "time", "offset", "size", "type", "kf", "cd", "pt", "cts", "dts", "pts", "ddts");
     let mut i = 0;
+    let mut last_v_tag: Option<FLVTag> = None;
+    let mut last_a_tag: Option<FLVTag> = None;
     loop {
         let position = parser.get_position();
         let tag = parser.next();
@@ -61,30 +66,45 @@ fn flv_info(path: &String, show_meta: bool, all_frame: bool) {
         let tag = tag.unwrap();
         match tag.get_tag_type() {
             FLVTagType::TAG_TYPE_VIDEO => {
-                if tag.get_frame_type() == 1 {//key frames
-                    println!("{:?}", (i, format_seconds_ms(tag.get_timestamp()), tag.get_tag_type(), tag.get_frame_type(), tag.get_codec_id(), tag.get_avc_packet_type(), position));
+                let dts_delta: i64 = if last_v_tag.is_some() {
+                    (tag.get_timestamp() as i64) - (last_v_tag.unwrap().get_timestamp() as i64)
+                } else {
+                    0
+                };
+                if tag.get_frame_type() == 1 && video_frame{// FRAME_TYPE_KEYFRAME
+                    if tag.get_avc_packet_type() == 0 { // AVC_PACKET_TYPE_SEQUENCE_HEADER
+                        println!("{}", format!("{:>6} | {:>10} | {:>10} | {:>6} | {:>4} | {:>2} | {:>2} | {:>2} | {:>4} | {:>6} | {:>6} | {:>6}"     , i, format_seconds_ms(tag.get_timestamp()), position, tag.get_tag_size(), tag.get_tag_type() as usize, tag.get_frame_type(), tag.get_codec_id(), tag.get_avc_packet_type(), 0, 0, 0, dts_delta).on_red());
+                        i += 1;
+                    } else { // AVC_PACKET_TYPE_NALU
+                        println!("{}", format!("{:>6} | {:>10} | {:>10} | {:>6} | {:>4} | {:>2} | {:>2} | {:>2} | {:>4} | {:>6} | {:>6} | {:>6} | {}", i, format_seconds_ms(tag.get_timestamp()), position, tag.get_tag_size(), tag.get_tag_type() as usize, tag.get_frame_type(), tag.get_codec_id(), tag.get_avc_packet_type(), tag.get_avc_composition_time_offset(), tag.get_timestamp(), (tag.get_timestamp() as i64) + (tag.get_avc_composition_time_offset() as i64), dts_delta, tag.get_nal_uints_info()).on_blue());
+                        i += 1;
+                    }
+                } else if all_frame && video_frame {
+                    println!("{}", format!("{:>6} | {:>10} | {:>10} | {:>6} | {:>4} | {:>2} | {:>2} | {:>2} | {:>4} | {:>6} | {:>6} | {:>6} | {}", i, format_seconds_ms(tag.get_timestamp()), position, tag.get_tag_size(), tag.get_tag_type() as usize, tag.get_frame_type(), tag.get_codec_id(), tag.get_avc_packet_type(), tag.get_avc_composition_time_offset(), tag.get_timestamp(), (tag.get_timestamp() as i64) + (tag.get_avc_composition_time_offset() as i64), dts_delta, tag.get_nal_uints_info()).on_magenta());
                     i += 1;
                 }
-                else if all_frame {
-                    println!("{:?}", (i, format_seconds_ms(tag.get_timestamp()), tag.get_tag_type(), tag.get_frame_type(), tag.get_codec_id(), tag.get_avc_packet_type(), position));
-                    i += 1;
-                }
+                last_v_tag = Some(tag);
             },
             FLVTagType::TAG_TYPE_AUDIO => {
-                if tag.is_acc_sequence_header() {
-                    println!("{:?}", (i, format_seconds_ms(tag.get_timestamp()), tag.get_tag_type(), tag.get_data_size(), position));
+                let dts_delta: i64 = if last_a_tag.is_some() {
+                    (tag.get_timestamp() as i64) - (last_a_tag.unwrap().get_timestamp() as i64)
+                } else {
+                    0
+                };
+                if tag.is_acc_sequence_header() && audio_frame {
+                    println!("{}", format!("{:>6} | {:>10} | {:>10} | {:>6} | {:>4} | {:>2} | {:>2} | {:>2} | {:>4} | {:>6} | {:>6} | {:>6}", i, format_seconds_ms(tag.get_timestamp()), position, tag.get_tag_size(), tag.get_tag_type() as usize, "", "", "", "", tag.get_timestamp(), "", dts_delta).on_cyan());
                     i += 1;
                 }
-                else if all_frame {
-                    println!("{:?}", (i, format_seconds_ms(tag.get_timestamp()), tag.get_tag_type(), tag.get_data_size(), position));
+                else if all_frame && audio_frame {
+                    println!("{}", format!("{:>6} | {:>10} | {:>10} | {:>6} | {:>4} | {:>2} | {:>2} | {:>2} | {:>4} | {:>6} | {:>6} | {:>6}", i, format_seconds_ms(tag.get_timestamp()), position, tag.get_tag_size(), tag.get_tag_type() as usize, "", "", "", "", tag.get_timestamp(), "", dts_delta).on_yellow());
                     i += 1;
                 }
+                last_a_tag = Some(tag);
             },
             FLVTagType::TAG_TYPE_SCRIPTDATAOBJECT => {
+                println!("{:>6} | {:>10} | {:>10} | {:>6} | {:>4} | {:>2} | {:>2} | {:>2}", i, format_seconds_ms(tag.get_timestamp()), position, tag.get_tag_size(), tag.get_tag_type() as usize, "", "", "");
                 if show_meta {
                     print_metatag(&Json::Array(tag.get_objects()));
-                } else {
-                    println!("metatag");
                 }
                 i += 1;
             }
@@ -104,6 +124,8 @@ fn main() {
     let mut opts = Options::new();
     opts.optflag("m", "meta", "show metadata");
     opts.optflag("a", "all", "print all frames");
+    opts.optflag("v", "video", "print video frames");
+    opts.optflag("d", "audio", "print audio frames");
     opts.optflag("h", "help", "print this help menu");
     opts.optflag("c", "crc32", "calculate crc32 of tags");
 
@@ -124,12 +146,14 @@ fn main() {
         return;
     };
     let show_meta = matches.opt_present("m");
-    let all_frame = matches.opt_present("a");
     let crc32_file = matches.opt_present("c");
+    let all_frame = matches.opt_present("a");
+    let video_frame = matches.opt_present("v");
+    let audio_frame = matches.opt_present("d");
     if crc32_file {
         flv_crc32(&input);
     } else {
-        flv_info(&input, show_meta, all_frame);
+        flv_info(&input, show_meta, all_frame, video_frame, audio_frame);
     }
 }
 

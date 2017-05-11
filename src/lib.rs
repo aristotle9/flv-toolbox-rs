@@ -3,7 +3,7 @@ extern crate byteorder;
 extern crate xml;
 
 use std::collections::BTreeMap;
-use std::io::{Read, Write, Cursor, Seek};
+use std::io::{Read, Write, Cursor, Seek, SeekFrom};
 use self::byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use self::rustc_serialize::json::Json;
 
@@ -361,6 +361,58 @@ impl FLVTag {
     pub fn get_avc_packet_type(&self) -> u8 {
         assert_eq!(self.get_tag_type(), FLVTagType::TAG_TYPE_VIDEO);
         self.data[TAG_HEADER_BYTE_COUNT as usize + 1]
+    }
+
+    pub fn get_avc_composition_time_offset(&self) -> i32 {
+        assert_eq!(self.get_codec_id(), 7); // CODEC_ID_AVC
+        assert_eq!(self.get_avc_packet_type(), 1); // AVC_PACKET_TYPE_NALU
+        let mut value: i32 = (self.data[TAG_HEADER_BYTE_COUNT as usize + 2] as i32) << 16;
+        value |= (self.data[TAG_HEADER_BYTE_COUNT as usize + 3] as i32) << 8;
+        value |= self.data[TAG_HEADER_BYTE_COUNT as usize + 4] as i32;
+        if (value & 0x00800000) != 0 {
+            value |= 0xff000000;	// sign-extend the 24-bit read for a 32-bit int
+        }
+        return value;
+    }
+
+    pub fn get_nal_uints_info(&self) -> String { // see see what in the data
+        
+        use std::fmt::Write;
+        
+        assert_eq!(self.get_codec_id(), 7); // CODEC_ID_AVC
+        let mut handle: Cursor<&[u8]> = Cursor::new(&self.data[(TAG_HEADER_BYTE_COUNT as usize)..]);
+        let mut ret: String = String::new();
+
+        handle.seek(SeekFrom::Start(5)); // seek to nalus
+        let data_size = self.get_data_size() as u64;
+        loop {
+            let bytes_avaliable = data_size - handle.seek(SeekFrom::Current(0)).unwrap();
+            if bytes_avaliable < 4 {
+                break;
+            }
+            let nalu_size = handle.read_u32::<BigEndian>().unwrap() as u64;
+            if bytes_avaliable < 4 + nalu_size {
+                break;
+            }
+            let nalu_type = handle.read_u8().unwrap();
+            let tp  = match nalu_type & 0x1F {
+                1 => "   ", // IBP
+                5 => "IDR", // IDR
+                6 => "SEI", // SEI
+                7 => "SPS", // SPS
+                8 => "PPS", // PPS
+                _ => panic!("unknow nalu type"),
+            };
+            let tag = match ((nalu_type >> 5) & 0x3) {
+                0b11 => "I",
+                0b10 => "P",
+                0b00 => "B",
+                _ => panic!("unknow nalu type"),
+            };
+            write!(ret, "[{} {} {:>5}] ", tp, tag, nalu_size);
+            handle.seek(SeekFrom::Current((nalu_size as i64) - 1));
+        }
+        return ret;
     }
 }
 
