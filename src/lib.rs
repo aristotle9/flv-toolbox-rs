@@ -347,6 +347,18 @@ impl FLVTag {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct AvcC {
+    version: u8,
+    profile: u8,
+    compatibility: u8,
+    level: u8,
+    nalu_length_size_minus_1: u8,
+    num_of_sps: u8,
+    sps: Vec<u8>,
+    pps_array: Vec<Vec<u8>>,
+}
+
 impl FLVTag {
     pub fn get_frame_type(&self) -> u8 {
         assert_eq!(self.get_tag_type(), FLVTagType::TAG_TYPE_VIDEO);
@@ -413,6 +425,55 @@ impl FLVTag {
             handle.seek(SeekFrom::Current((nalu_size as i64) - 1));
         }
         return ret;
+    }
+
+    pub fn get_avcc(&self) -> AvcC {
+        
+        assert_eq!(self.get_tag_type(), FLVTagType::TAG_TYPE_VIDEO);
+        assert_eq!(self.get_codec_id(), 7); // CODEC_ID_AVC
+        assert_eq!(self.get_avc_packet_type(), 0); // AVC_PACKET_TYPE_SEQUENCE_HEADER
+        
+        let mut data: Cursor<&[u8]> = Cursor::new(&self.data);
+        data.seek(SeekFrom::Start((TAG_HEADER_BYTE_COUNT + 5) as u64));
+        // parse start
+        let version: u8 = data.read_u8().unwrap();
+        let profile: u8 = data.read_u8().unwrap();
+        let compatibility: u8 = data.read_u8().unwrap();
+        let level: u8 = data.read_u8().unwrap();
+        
+        let nalu_length_size_minus_1: u8 = data.read_u8().unwrap() & 0b00000011;
+        let num_of_sps: u8 = data.read_u8().unwrap() & 0b00011111;
+        assert_eq!(num_of_sps, 1);
+        
+        let sps_len = data.read_u16::<BigEndian>().unwrap();
+        let mut sps: Vec<u8> = Vec::with_capacity(sps_len as usize);
+        {
+            let mut handle = data.by_ref().take(sps_len as u64);
+            let read_len = handle.read_to_end(&mut sps).unwrap();
+            assert_eq!(read_len, sps_len as usize);
+        }
+
+        let num_of_pps = data.read_u8().unwrap();
+        let mut pps_array: Vec<Vec<u8>> = Vec::with_capacity(num_of_pps as usize);
+        for _ in 0..(num_of_pps as usize) {
+            let pps_len = data.read_u16::<BigEndian>().unwrap();
+            let mut pps: Vec<u8> = Vec::with_capacity(pps_len as usize);
+            let mut handle = data.by_ref().take(pps_len as u64);
+            let read_len = handle.read_to_end(&mut pps).unwrap();
+            assert_eq!(read_len, pps_len as usize);
+            pps_array.push(pps);
+        }
+
+        AvcC {
+            version,
+            profile,
+            compatibility,
+            level,
+            nalu_length_size_minus_1,
+            num_of_sps,
+            sps,
+            pps_array,
+        }
     }
 }
 
