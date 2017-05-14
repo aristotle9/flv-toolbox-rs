@@ -349,14 +349,14 @@ impl FLVTag {
 
 #[derive(Debug, Clone)]
 pub struct AvcC {
-    version: u8,
-    profile: u8,
-    compatibility: u8,
-    level: u8,
-    nalu_length_size_minus_1: u8,
-    num_of_sps: u8,
-    sps: Vec<u8>,
-    pps_array: Vec<Vec<u8>>,
+    pub version: u8,
+    pub profile: u8,
+    pub compatibility: u8,
+    pub level: u8,
+    pub nalu_length_size_minus_1: u8,
+    pub num_of_sps: u8,
+    pub sps: Vec<u8>,
+    pub pps_array: Vec<Vec<u8>>,
 }
 
 impl FLVTag {
@@ -419,12 +419,40 @@ impl FLVTag {
                 0b11 => "I",
                 0b10 => "P",
                 0b00 => "B",
-                _ => panic!("unknow nalu type"),
+                _    => "X", // panic!("unknow nalu type"),
             };
             write!(ret, "[{} {} {:>5}] ", tp, tag, nalu_size);
             handle.seek(SeekFrom::Current((nalu_size as i64) - 1));
         }
         return ret;
+    }
+
+    // for ffmpeg avpacket
+    pub fn get_nal_units(&self) -> Vec<Vec<u8>> {
+        
+        let mut units: Vec<Vec<u8>> = Vec::new();
+        let mut handle: Cursor<&[u8]> = Cursor::new(&self.data[(TAG_HEADER_BYTE_COUNT as usize)..]);
+
+        handle.seek(SeekFrom::Start(5)); // seek to nalus
+        let data_size = self.get_data_size() as u64;
+        loop {
+            let bytes_avaliable = data_size - handle.seek(SeekFrom::Current(0)).unwrap();
+            if bytes_avaliable < 4 {
+                break;
+            }
+            let nalu_size = handle.read_u32::<BigEndian>().unwrap() as u64;
+            if bytes_avaliable < 4 + nalu_size {
+                break;
+            }
+            let mut nalu_data: Vec<u8> = vec![0; nalu_size as usize];
+            handle.read_exact(&mut nalu_data).unwrap();
+            units.push(nalu_data);
+        }
+        return units;
+    }
+
+    pub fn get_avcc_data(&self) -> &[u8] {
+        &self.data[(TAG_HEADER_BYTE_COUNT as usize + 5)..]
     }
 
     pub fn get_avcc(&self) -> AvcC {
@@ -446,21 +474,15 @@ impl FLVTag {
         assert_eq!(num_of_sps, 1);
         
         let sps_len = data.read_u16::<BigEndian>().unwrap();
-        let mut sps: Vec<u8> = Vec::with_capacity(sps_len as usize);
-        {
-            let mut handle = data.by_ref().take(sps_len as u64);
-            let read_len = handle.read_to_end(&mut sps).unwrap();
-            assert_eq!(read_len, sps_len as usize);
-        }
+        let mut sps: Vec<u8> = vec![0; sps_len as usize];
+        data.read_exact(&mut sps).unwrap();
 
         let num_of_pps = data.read_u8().unwrap();
         let mut pps_array: Vec<Vec<u8>> = Vec::with_capacity(num_of_pps as usize);
         for _ in 0..(num_of_pps as usize) {
             let pps_len = data.read_u16::<BigEndian>().unwrap();
-            let mut pps: Vec<u8> = Vec::with_capacity(pps_len as usize);
-            let mut handle = data.by_ref().take(pps_len as u64);
-            let read_len = handle.read_to_end(&mut pps).unwrap();
-            assert_eq!(read_len, pps_len as usize);
+            let mut pps: Vec<u8> = vec![0; pps_len as usize];
+            data.read_exact(&mut pps).unwrap();
             pps_array.push(pps);
         }
 
@@ -477,10 +499,138 @@ impl FLVTag {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct AudioSpecificConfig {
+    original_audio_object_type: u8,
+    audio_object_type: u8,
+    sample_index: u8,
+    channel_config: u8,
+}
+
+const SOUND_FORMAT_LINEAR: u8 = 0;
+const SOUND_FORMAT_ADPCM: u8 = 1;
+const SOUND_FORMAT_MP3: u8 = 2;
+const SOUND_FORMAT_LINEAR_LE: u8 = 3;
+const SOUND_FORMAT_NELLYMOSER_16K: u8 = 4;
+const SOUND_FORMAT_NELLYMOSER_8K: u8 = 5;
+const SOUND_FORMAT_NELLYMOSER: u8 = 6;
+const SOUND_FORMAT_G711A: u8 = 7;
+const SOUND_FORMAT_G711U: u8 = 8;
+const SOUND_FORMAT_AAC: u8 = 10;
+const SOUND_FORMAT_SPEEX: u8 = 11;
+const SOUND_FORMAT_MP3_8K: u8 = 14;
+const SOUND_FORMAT_DEVICE_SPECIFIC: u8 = 15;
+
+const SOUND_RATE_5K : f64 = 5512.5_f64;
+const SOUND_RATE_11K: f64 = 11025_f64;
+const SOUND_RATE_22K: f64 = 22050_f64;
+const SOUND_RATE_44K: f64 = 44100_f64;
+
+const SOUND_SIZE_8BITS: u8 = 8;
+const SOUND_SIZE_16BITS: u8 = 16;
+
+const SOUND_CHANNELS_MONO: u8 = 1;
+const SOUND_CHANNELS_STEREO: u8 = 2;
+
 impl FLVTag {
     pub fn get_sound_format(&self) -> u8 {
         assert_eq!(self.get_tag_type(), FLVTagType::TAG_TYPE_AUDIO);
         (self.data[TAG_HEADER_BYTE_COUNT as usize + 0] >> 4) & 0x0f
+    }
+
+    pub fn get_sound_rate(&self) -> f64 {
+        assert_eq!(self.get_tag_type(), FLVTagType::TAG_TYPE_AUDIO);
+        match (self.data[TAG_HEADER_BYTE_COUNT as usize + 0] >> 2) & 0b11 {
+            0 => SOUND_RATE_5K,
+            1 => SOUND_RATE_11K,
+            2 => SOUND_RATE_22K,
+            3 => SOUND_RATE_44K,
+            _ => panic!("get soundRate() a two-bit number wasn't 0, 1, 2, or 3. impossible.")
+        }
+    }
+
+    /// frame duration = num of samples / sound_rate
+    /// for aac, one frame always contains 1024 samples
+    /// @return in milliseconds
+    pub fn get_sound_frame_duration(&self) -> u64 {
+        assert_eq!(self.get_tag_type(), FLVTagType::TAG_TYPE_AUDIO);
+        assert_eq!(self.get_sound_format(), SOUND_FORMAT_AAC);
+        if self.is_acc_sequence_header() {
+            return 0;
+        }
+        return (1000. * 1024. / self.get_sound_rate()) as u64;
+    }
+
+    pub fn get_sound_size(&self) -> u8 {
+        assert_eq!(self.get_tag_type(), FLVTagType::TAG_TYPE_AUDIO);
+        if ((self.data[TAG_HEADER_BYTE_COUNT as usize + 0] >> 1) & 1) == 1 {
+            SOUND_SIZE_16BITS
+        } else {
+            SOUND_SIZE_8BITS
+        }
+    }
+
+    pub fn get_sound_channels(&self) -> u8 {
+        assert_eq!(self.get_tag_type(), FLVTagType::TAG_TYPE_AUDIO);
+        if (self.data[TAG_HEADER_BYTE_COUNT as usize + 0] & 1) == 1 {
+            SOUND_CHANNELS_STEREO
+        } else {
+            SOUND_CHANNELS_MONO
+        }
+    }
+
+    pub fn get_sound_audio_specific_config(&self) -> AudioSpecificConfig {
+
+        let body: &[u8] = self.get_sound_data();
+        let original_audio_object_type: u8 = body[0] >> 3;
+        let audio_object_type: u8 = original_audio_object_type;
+        let sample_index: u8 = ((body[0] & 0x07) << 1) | (body[1] >> 7);
+        let channel_config:u8 = (body[1] & 0x78) >> 3;
+        
+        AudioSpecificConfig {
+            original_audio_object_type,
+            audio_object_type,
+            sample_index,
+            channel_config,
+        }
+    }
+
+    pub fn get_sound_adts_header_data(asc: &AudioSpecificConfig, frame_len: u32) -> [u8; 7] {
+
+        let &AudioSpecificConfig { original_audio_object_type, audio_object_type, sample_index, channel_config } = asc;
+        
+        let mut header: [u8; 7] = [0; 7];
+        header[0]  = 0xff;         //syncword:0xfff                          高8bits
+        header[1]  = 0xf0;         //syncword:0xfff                          低4bits
+        header[1] |= (0 << 3);    //MPEG Version:0 for MPEG-4,1 for MPEG-2  1bit
+        header[1] |= (0 << 1);    //Layer:0                                 2bits
+        header[1] |= 1;           //protection absent:1                     1bit
+
+        header[2]  = (audio_object_type - 1) << 6; //profile:audio_object_type - 1                      2bits
+        header[2] |= (sample_index & 0x0f) << 2;   //sampling frequency index:sampling_frequency_index  4bits
+        header[2] |= (0 << 1);                     //private bit:0                                      1bit
+        header[2] |= (channel_config & 0x04) >> 2; //channel configuration:channel_config               高1bit
+
+        header[3]  = (channel_config & 0x03) << 6;  //channel configuration:channel_config      低2bits
+        header[3] |= (0 << 5);                      //original：0                               1bit
+        header[3] |= (0 << 4);                      //home：0                                   1bit
+        header[3] |= (0 << 3);                      //copyright id bit：0                       1bit
+        header[3] |= (0 << 2);                      //copyright id start：0                     1bit
+
+        header[3] |= ((frame_len & 0x1800) >> 11) as u8;  //frame length：value   高2bits
+        header[4] = ((frame_len & 0x7f8) >> 3) as u8;     //frame length:value    中间8bits 
+        header[5] = ((frame_len & 0x7) << 5) as u8;       //frame length:value    低3bits
+        header[5] |= 0x1f;                              //buffer fullness:0x7ff 高5bits 
+        header[6] = 0xfc;
+        return header;
+    }
+
+    pub fn get_sound_data(&self) -> &[u8] {
+        self.data[(TAG_HEADER_BYTE_COUNT as usize + 2)..].as_ref()
+    }
+
+    pub fn get_sound_data_size(&self) -> u32 {
+        self.get_data_size() - 2
     }
 
     pub fn is_acc_sequence_header(&self) -> bool {

@@ -10,6 +10,15 @@ xml-rs = "0.2"
 getopts = "0.2"
 colored = "^1.5"
 
+[dependencies.ffmpeg]
+path = "../rust-ffmpeg"
+
+#[dependencies.ffmpeg-sys]
+#path = "../rust-ffmpeg-sys"
+
+[lib]
+path = "src/mod.rs"
+
 [[bin]]
 name = "flv-info"
 path = "src/flv-info.rs"
