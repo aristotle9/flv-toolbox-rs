@@ -54,9 +54,9 @@ fn get_info(path: &str) -> FlvTimeInfo {
         match tag.get_tag_type() {
             FLVTagType::TAG_TYPE_VIDEO => {
 
-                let mut time_delta = 0;
                 if last_video_tag.is_some() {
-                    time_delta = tag.get_timestamp() as i64 - last_video_tag.as_ref().unwrap().get_timestamp() as i64;
+                    let time_delta = tag.get_timestamp() as i64 - last_video_tag.as_ref().unwrap().get_timestamp() as i64;
+                    timestamps.push(TagTimestamp::Video(last_video_tag.as_ref().unwrap().get_timestamp() as i64, time_delta));
                     *(video_duration_map.entry(time_delta).or_insert(0)) += 1;
                 }
 
@@ -67,29 +67,26 @@ fn get_info(path: &str) -> FlvTimeInfo {
 
                             },
                             _ => { // normal keyframes
-                                timestamps.push(TagTimestamp::Video(tag.get_timestamp() as i64, time_delta));
                                 last_video_tag = Some(tag);
                             }
                         };
                     }
                     _ => { // normal frames
-                        timestamps.push(TagTimestamp::Video(tag.get_timestamp() as i64, time_delta));
                         last_video_tag = Some(tag);
                     }
                 };
             },
             FLVTagType::TAG_TYPE_AUDIO => {
 
-                let mut time_delta = 0;
                 if last_audio_tag.is_some() {
-                    time_delta = tag.get_timestamp() as i64 - last_audio_tag.as_ref().unwrap().get_timestamp() as i64;
+                    let time_delta = tag.get_timestamp() as i64 - last_audio_tag.as_ref().unwrap().get_timestamp() as i64;
+                    timestamps.push(TagTimestamp::Audio(last_audio_tag.as_ref().unwrap().get_timestamp() as i64, time_delta));
                     *(audio_duration_map.entry(time_delta).or_insert(0)) += 1;
                 }
 
                 if tag.is_acc_sequence_header() { // acc sequence header
 
                 } else { // normal frames
-                    timestamps.push(TagTimestamp::Audio(tag.get_timestamp() as i64, time_delta));
                     last_audio_tag = Some(tag);
                 }
             },
