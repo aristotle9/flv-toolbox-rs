@@ -108,11 +108,13 @@ fn get_info(path: &str) -> FlvTimeInfo {
                     let packet = ffmpeg::codec::packet::Packet::borrow(&audio_buffer);
                     let mut frame = ffmpeg::util::frame::Audio::empty();
                     let result = decoder.decode(&packet, &mut frame).unwrap();
-                    let duration = 1000. * frame.samples() as f64 / frame.rate() as f64;
-                    last_audio_decode_duration = duration as i64;
-                    // println!("{:?}", (frame.channels(), frame.rate(), frame.samples(), duration));
-                    
-                    last_audio_tag = Some(tag);
+                    if result {
+                        let duration = 1000. * frame.samples() as f64 / frame.rate() as f64;
+                        last_audio_decode_duration = duration as i64;
+                        // println!("{:?}", (frame.channels(), frame.rate(), frame.samples(), duration));
+                        
+                        last_audio_tag = Some(tag);
+                    }
                 }
             },
             FLVTagType::TAG_TYPE_SCRIPTDATAOBJECT => {
@@ -157,7 +159,7 @@ fn check_offset(info: &FlvTimeInfo) {
 
     let mut video_time: i64 = 0;
     let mut audio_time: i64 = 0;
-    let mut current_time = 0;
+    let mut current_time: i64 = 0;
 
     for tm in timestamps.iter() {
         let mut changed = false;
@@ -177,13 +179,12 @@ fn check_offset(info: &FlvTimeInfo) {
                 if (*duration - *decode_duration).abs() > 1 {
                     // println!("a offset {}", audio_time - *time);
                     changed = true;
-                    audio_time += *decode_duration;
-                } else {
-                    audio_time += *decode_duration;
                 }
+                audio_time += *decode_duration;
             }
         };
         if changed {
+            // println!("{}: av offset: {} {} {}", format_seconds_ms(current_time as u64), audio_time, current_time, video_time);
             println!("{}: av offset: {} {} {}", format_seconds_ms(current_time as u64), audio_time - video_time, audio_time - current_time, video_time - current_time);
         }
     }
