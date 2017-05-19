@@ -197,7 +197,7 @@ const TAG_HEADER_BYTE_COUNT: u32 = 11;
 const PREV_TAG_BYTE_COUNT: u32 = 4;
 const MIN_FILE_HEADER_BYTE_COUNT: u32 = 9;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum FLVTagType {
     TAG_TYPE_AUDIO = 8,
     TAG_TYPE_VIDEO = 9,

@@ -1,48 +1,96 @@
 extern crate ffmpeg;
+extern crate rustc_serialize;
 extern crate flv_toolbox_rs;
 
-use flv_toolbox_rs::lib::{ FLVTagRead, FLVTag, FLVTagType, FLVTagWrite, format_seconds_ms, AudioSpecificConfig };
+use flv_toolbox_rs::lib::{ FLVTagRead, FLVHeader, FLVTag, FLVTagType, FLVTagWrite, format_seconds_ms, AudioSpecificConfig };
 
+use rustc_serialize::json::{Json};
 use std::fs::File;
-use std::io::{ Read, Write };
-use std::slice;
+use std::io::{ Read, Write, Cursor, Seek, SeekFrom };
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone)]
-pub struct FlvTimeInfo {
-    pub ref_video_frame_duration: u64,
-    pub ref_audio_frame_duration: u64,
-    pub real_video_frame_duration: i64,
-    pub real_audio_frame_duration: i64,
-    pub timestamps: Vec<TagTimestamp>,
-}
+const PROGRAM_SIGN: &'static str = "audio gap fixed by timestamp-normalization, 2017";
+
+type FLVInfo = Vec<TagProfile>;
+
+type Id = u64;
 
 #[derive(Debug, Clone)]
-pub enum TagTimestamp {
-    Video(i64, i64),
-    Audio(i64, i64, i64),
+pub struct TagProfile {
+    pub id: u64,
+    pub tag_type: FLVTagType,
+    pub timestamp: i64,
+    pub position: u64,
+    pub sequence_header: bool,
+    pub keyframe: bool,
+    pub decode_duration: i64,
+    pub duration: i64,
+    pub offset: i64,
+    pub deleted: bool,
 }
 
-fn get_info(path: &str) -> FlvTimeInfo {
+impl TagProfile {
+    pub fn new_video(id: u64, timestamp: i64, position: u64, sequence_header: bool, keyframe: bool) -> Self {
+        TagProfile {
+            id,
+            tag_type: FLVTagType::TAG_TYPE_VIDEO,
+            timestamp,
+            position,
+            sequence_header,
+            keyframe,
+            decode_duration: 0,
+            duration: 0,
+            offset: 0,
+            deleted: false,
+        }
+    }
+
+    pub fn new_audio(id: u64, timestamp: i64, position: u64, sequence_header: bool, decode_duration: i64, duration: i64) -> Self {
+        TagProfile {
+            id,
+            tag_type: FLVTagType::TAG_TYPE_AUDIO,
+            timestamp,
+            position,
+            sequence_header,
+            keyframe: sequence_header,
+            decode_duration,
+            duration,
+            offset: 0,
+            deleted: false,
+        }
+    }
+
+    pub fn new_meta(id: u64, timestamp: i64, position: u64) -> Self {
+        TagProfile {
+            id,
+            tag_type: FLVTagType::TAG_TYPE_SCRIPTDATAOBJECT,
+            timestamp,
+            position,
+            sequence_header: false,
+            keyframe: false,
+            decode_duration: 0,
+            duration: 0,
+            offset: 0,
+            deleted: false,
+        }
+    }
+
+    pub fn tag(&self, file: &mut File) -> FLVTag {
+        file.seek(SeekFrom::Start(self.position));
+        FLVTag::read(file).unwrap()
+    }
+}
+
+fn get_info(path: &str) -> FLVInfo {
     
     let mut file = File::open(path).unwrap();
     let file_info = file.metadata().unwrap();
     let file_len = file_info.len();
     let mut parser = FLVTagRead::new(&mut file);
 
-    let mut ref_video_frame_duration: u64 = 0;
-    let mut ref_audio_frame_duration: u64 = 0;
-    let mut real_video_frame_duration: i64 = 0;
-    let mut real_audio_frame_duration: i64 = 0;
+    let mut id: u64 = 0;
 
-    let mut last_video_tag: Option<FLVTag> = None;
-    let mut video_duration_map: BTreeMap<i64, u64> = BTreeMap::new();
-
-    let mut last_audio_tag: Option<FLVTag> = None;
-    let mut audio_duration_map: BTreeMap<i64, u64> = BTreeMap::new();
-    let mut last_audio_decode_duration: i64 = 0;
-
-    let mut timestamps: Vec<TagTimestamp> = vec![];
+    let mut info: FLVInfo = Vec::new();
 
     // ffmpeg
     ffmpeg::init().unwrap();
@@ -55,7 +103,7 @@ fn get_info(path: &str) -> FlvTimeInfo {
 
     loop {
         let position = parser.get_position();
-        print!("progress: {: >3.0}%\r", position as f64 / file_len as f64 * 100.);
+        print!("scan progress: {: >3.0}%\r", position as f64 / file_len as f64 * 100.);
         let nxt: Option<FLVTag> = parser.next();
         if nxt.is_none() {
             break;
@@ -64,39 +112,12 @@ fn get_info(path: &str) -> FlvTimeInfo {
         
         match tag.get_tag_type() {
             FLVTagType::TAG_TYPE_VIDEO => {
-
-                if last_video_tag.is_some() {
-                    let time_delta = tag.get_timestamp() as i64 - last_video_tag.as_ref().unwrap().get_timestamp() as i64;
-                    timestamps.push(TagTimestamp::Video(last_video_tag.as_ref().unwrap().get_timestamp() as i64, time_delta));
-                    *(video_duration_map.entry(time_delta).or_insert(0)) += 1;
-                }
-
-                match tag.get_frame_type() {
-                    1 => {
-                        match tag.get_avc_packet_type() {
-                            0 => { // AVC_PACKET_TYPE_SEQUENCE_HEADER
-
-                            },
-                            _ => { // normal keyframes
-                                last_video_tag = Some(tag);
-                            }
-                        };
-                    }
-                    _ => { // normal frames
-                        last_video_tag = Some(tag);
-                    }
-                };
+                info.push(TagProfile::new_video(id, tag.get_timestamp() as i64, position, tag.get_frame_type() == 1 && tag.get_avc_packet_type() == 0, tag.get_frame_type() == 1));
             },
             FLVTagType::TAG_TYPE_AUDIO => {
-
-                if last_audio_tag.is_some() {
-                    let time_delta = tag.get_timestamp() as i64 - last_audio_tag.as_ref().unwrap().get_timestamp() as i64;
-                    timestamps.push(TagTimestamp::Audio(last_audio_tag.as_ref().unwrap().get_timestamp() as i64, time_delta, last_audio_decode_duration));
-                    *(audio_duration_map.entry(time_delta).or_insert(0)) += 1;
-                }
-
                 if tag.is_acc_sequence_header() { // acc sequence header
                     asc = Some(tag.get_sound_audio_specific_config());
+                    info.push(TagProfile::new_audio(id, tag.get_timestamp() as i64, position, true, 0, 0));
                 } else { // normal frames
                     // decode audio frame samples by ffmpeg
                     let mut audio_buffer: Vec<u8> = Vec::with_capacity(tag.get_sound_data_size() as usize + 7);
@@ -108,32 +129,22 @@ fn get_info(path: &str) -> FlvTimeInfo {
                     let packet = ffmpeg::codec::packet::Packet::borrow(&audio_buffer);
                     let mut frame = ffmpeg::util::frame::Audio::empty();
                     let result = decoder.decode(&packet, &mut frame).unwrap();
+                    let mut duration: i64 = 0;
                     if result {
-                        let duration = 1000. * frame.samples() as f64 / frame.rate() as f64;
-                        last_audio_decode_duration = duration as i64;
+                        duration = (1000. * frame.samples() as f64 / frame.rate() as f64) as i64;
                         // println!("{:?}", (frame.channels(), frame.rate(), frame.samples(), duration));
-                        
-                        last_audio_tag = Some(tag);
                     }
+                    info.push(TagProfile::new_audio(id, tag.get_timestamp() as i64, position, false, duration, 0));
                 }
             },
             FLVTagType::TAG_TYPE_SCRIPTDATAOBJECT => {
-
+                info.push(TagProfile::new_meta(id, tag.get_timestamp() as i64, position));
             }
         };
+        id += 1;
     }
-    println!("complete!\r");
-
-    real_video_frame_duration = top_duration(&video_duration_map);
-    real_audio_frame_duration = top_duration(&audio_duration_map);
-
-    return FlvTimeInfo {
-        ref_video_frame_duration  ,
-        ref_audio_frame_duration  ,
-        real_video_frame_duration ,
-        real_audio_frame_duration ,
-        timestamps                ,
-    };
+    println!("scan complete!\r");
+    return info;
 }
 
 fn top_duration(pairs: &BTreeMap<i64, u64>) -> i64 {
@@ -148,52 +159,302 @@ fn top_duration(pairs: &BTreeMap<i64, u64>) -> i64 {
     }
 }
 
-fn check_offset(info: &FlvTimeInfo) {
-    let &FlvTimeInfo {
-        ref ref_video_frame_duration  ,
-        ref ref_audio_frame_duration  ,
-        ref real_video_frame_duration ,
-        ref real_audio_frame_duration ,
-        ref timestamps                ,
-    } = info;
+fn check_offset(info: &mut FLVInfo) -> bool {
 
-    let mut video_time: i64 = 0;
-    let mut audio_time: i64 = 0;
-    let mut current_time: i64 = 0;
-
-    for tm in timestamps.iter() {
-        let mut changed = false;
-        match tm {
-            &TagTimestamp::Video(ref time, ref duration) => {
-                // current_time = *time;
-                if (*duration - *real_video_frame_duration).abs() > 1 {
-                    // println!("v offset {}", video_time - *time);
-                    // changed = true;
-                    video_time += *real_video_frame_duration;
-                } else {
-                    video_time += *duration;
+    let mut last_audio_id: Id = 0;
+    {// 计算实际的 frame duration
+        let mut last_audio_profile: Option<&mut TagProfile> = None;
+        for item in info.iter_mut() {
+            let mut audio = false;
+            {
+                let &mut TagProfile {
+                    ref id,
+                    ref tag_type,
+                    ref timestamp,
+                    ..
+                } = item;
+                match *tag_type {
+                    FLVTagType::TAG_TYPE_AUDIO => {
+                        if let Some(&mut TagProfile { timestamp: ref last_timestamp, ref mut duration, .. }) = last_audio_profile {
+                            *duration = *timestamp - *last_timestamp;
+                        }
+                        audio = true;
+                        last_audio_id = *id;
+                    }
+                    _ => {
+                    }
                 }
             }
-            &TagTimestamp::Audio(ref time, ref duration, ref decode_duration) => {
-                current_time = *time;
-                if (*duration - *decode_duration).abs() > 1 {
-                    // println!("a offset {}", audio_time - *time);
-                    changed = true;
-                }
-                audio_time += *decode_duration;
+            if audio {
+                last_audio_profile = Some(item);
             }
-        };
-        if changed {
-            // println!("{}: av offset: {} {} {}", format_seconds_ms(current_time as u64), audio_time, current_time, video_time);
-            println!("{}: av offset: {} {} {}", format_seconds_ms(current_time as u64), audio_time - video_time, audio_time - current_time, video_time - current_time);
         }
     }
+    // println!("{:?}", info.iter_mut().filter(|item| {
+    //     match item {
+    //         &&mut TagProfile::Audio(_, _, _, _, _) => {
+    //             return true;
+    //         }
+    //         _ => {
+    //             return false;
+    //         }
+    //     }
+    // }).take(10).collect::<Vec<&mut TagProfile>>());
+
+    let mut audio_time: i64 = 0;
+    let mut has_gap: bool = false;
+
+    for item in info.iter() {
+        let &TagProfile {
+            ref id,
+            ref tag_type,
+            ref timestamp,
+            sequence_header: ref sh,
+            ref decode_duration,
+            ref duration,
+            ..
+        } = item;
+        match *tag_type {
+            FLVTagType::TAG_TYPE_AUDIO => {
+                audio_time += *decode_duration;
+                if (*duration - *decode_duration).abs() > 1 && *id != last_audio_id && !*sh {// 排除最后一个Tag(容器持续时间不能确定)，SequenceHeader
+                    // 打印经过这个Tag后会发生的偏移
+                    println!("{:>8} {} {:>8}", *id, format_seconds_ms(*timestamp as u64), (audio_time + decode_duration) - (*timestamp + *duration));
+                    has_gap = true;
+                }
+            }
+            _ => {}
+        };
+    }
+    return has_gap;
+}
+
+fn get_fix_info(info: FLVInfo) -> FLVInfo {
+    
+    // 计算重新排列后的 Tag 布局
+    // 不能扔的Tag, 比如 metadata avc sequence header
+    let mut c_tags: Vec<TagProfile> = vec![];
+    let mut v_tags: Vec<TagProfile> = vec![];
+    let mut a_tags: Vec<TagProfile> = vec![];
+
+    for item in info.iter() {
+        let &TagProfile {
+            ref tag_type,
+            sequence_header: ref sh,
+            ..
+        } = item;
+        match *tag_type {
+            FLVTagType::TAG_TYPE_AUDIO => {
+                if *sh {
+                    c_tags.push(item.clone());
+                } else {
+                    a_tags.push(item.clone());
+                }
+            }
+            FLVTagType::TAG_TYPE_VIDEO => {
+                if *sh {
+                    c_tags.push(item.clone());
+                } else {
+                    v_tags.push(item.clone());
+                }
+            }
+            _ => {
+                c_tags.push(item.clone());
+            }
+        }
+    }
+
+    let mut j: usize = 0;
+
+    let mut timeline_offset: i64 = 0;
+    let mut timeline_timestamp: i64 = 0;
+    let mut timeline_decode_duration: i64 = 0;
+//
+//   tm + offset     delta
+//   |           |<--- gap --->|
+//   +-----------+             +-----------+
+//   |dc_duration|             |           |
+//   +-----------+             +-----------+
+//   |<-------duration-------->|
+//   |<-- timeline
+//
+    for i in 0..a_tags.len() {
+        let TagProfile {
+            timestamp: ref tm,
+            ref decode_duration,
+            ref mut offset,
+            ..
+        } = a_tags[i];
+
+        let delta: i64 = (timeline_timestamp + timeline_offset + timeline_decode_duration) - (tm + timeline_offset);
+        if delta.abs() > 1 {
+            let gap_left = timeline_timestamp + timeline_offset + timeline_decode_duration;
+            let gap_right = *tm + timeline_offset;
+            loop {
+                let TagProfile {
+                    timestamp: ref tm,
+                    ref mut offset,
+                    ref mut deleted,
+                    ..
+                } = v_tags[j];
+                if *tm + timeline_offset <= gap_left {
+                    *offset = timeline_offset;
+                    j += 1;
+                    continue;
+                } else {
+                    if *tm + timeline_offset < gap_right {
+                        *deleted = true;
+                        j += 1;
+                        continue;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            println!("gap {:>6} {:>6} {:>6}", gap_left, gap_right, -delta);
+            timeline_offset += delta;
+        }
+        timeline_decode_duration = *decode_duration;
+        timeline_timestamp = *tm;
+        *offset = timeline_offset;
+    }
+
+    // for (ref k, ref v) in delete_flags.iter() {
+    //     println!("del vtag {:>6}", k);
+    // }
+    
+    println!("before delete by gop, {} tags would be deleted", v_tags.iter().filter(|t| t.deleted).count());
+    // del a gop when on frame has been deleted
+
+    let mut for_delete_indices: Vec<usize> = vec![];
+    let mut gop: Vec<usize> = vec![];
+    let mut gop_delete: bool = false;
+    for i in 0..v_tags.len() {
+        let TagProfile {
+            ref keyframe,
+            ref deleted,
+            ..
+        } = v_tags[i];
+        if *keyframe {
+            if gop_delete {
+                for_delete_indices.append(&mut gop);
+            } else {
+                gop.clear(); // clear
+            }
+            gop_delete = false;
+        }
+        gop.push(i);
+        if *deleted {
+            gop_delete = true;
+        }
+    }
+    if gop_delete {
+        for_delete_indices.append(&mut gop);
+    }
+
+    println!("after delete by gop, {} tags would be deleted", for_delete_indices.len());
+
+    for i in for_delete_indices.into_iter() {
+        v_tags[i].deleted = true;
+    }
+
+    // mux profiles
+    let mut new_profiles: Vec<TagProfile> = vec![];
+    new_profiles.append(&mut a_tags);
+    new_profiles.append(&mut v_tags.into_iter().filter(|t| !t.deleted).collect::<Vec<TagProfile>>());
+    new_profiles.sort_by_key(|t| t.timestamp + t.offset);
+    c_tags.append(&mut new_profiles);
+    return c_tags;
+}
+
+fn fix_file(path: &str, info: FLVInfo) {
+
+    use std::io::SeekFrom::{Current, Start};
+
+    let mut file = File::open(path).unwrap();
+    let file_info = file.metadata().unwrap();
+    let file_len = file_info.len();
+    
+    let mut output_file: File = File::create(format!("{}-fixed.flv", path)).unwrap();
+    let mut tag_write: FLVTagWrite<File> = FLVTagWrite::new(output_file);
+
+    let header = FLVHeader::read(&mut file);
+    tag_write.write_header(&header);
+
+    // function from flv-split
+    fn write_back_meta_tag(duration: u64, metatag: &mut FLVTag, times: &Vec<u64>, filepositions: &Vec<u64>, tag_write: &mut FLVTagWrite<File>) {
+        let mut metas = metatag.get_objects();
+        {
+            metas[1].as_object_mut().unwrap().insert("duration".to_string(), Json::F64(duration as f64 / 1000.0));
+            metas[1].as_object_mut().unwrap().insert("gapfixedby".to_string(), Json::String(PROGRAM_SIGN.to_string()));
+            let key_times = Json::Array(times.iter().map(|&t| Json::F64(t as f64 / 1000.0)).collect::<Vec<Json>>());
+            let key_positions = Json::Array(filepositions.iter().map(|&p| Json::F64(p as f64)).collect::<Vec<Json>>());
+            let keyframes = metas[1].as_object_mut().unwrap().get_mut("keyframes").unwrap().as_object_mut().unwrap();
+            keyframes.insert("times".to_string(), key_times);
+            keyframes.insert("filepositions".to_string(), key_positions);
+        }
+        metatag.set_objects(&metas);
+        tag_write.write_meta_tag(&metatag);
+    }
+
+    // create metatag
+    let times = info.iter()
+        .filter(|&&TagProfile { ref tag_type, ref keyframe, .. }| *tag_type == FLVTagType::TAG_TYPE_VIDEO && *keyframe )
+        .map(|&TagProfile { timestamp: ref t, .. }| *t as u64).collect::<Vec<u64>>();
+    let mut positions: Vec<u64> = vec![0u64; times.len()];
+    let mut metatag = info.iter().find(|&&TagProfile { ref tag_type, .. }| *tag_type == FLVTagType::TAG_TYPE_SCRIPTDATAOBJECT).unwrap().tag(&mut file);
+    let duration = {
+        let item = info.iter().filter(|&&TagProfile { ref tag_type, .. }| *tag_type == FLVTagType::TAG_TYPE_AUDIO).last().unwrap();
+        (item.timestamp + item.decode_duration) as u64
+    };
+
+    // write metatag
+    write_back_meta_tag(duration, &mut metatag, &times, &positions, &mut tag_write);
+
+    let mut frame_index: usize = 0;
+
+    for item in info.iter() {
+        let &TagProfile {
+            ref tag_type,
+            ref keyframe,
+            ref timestamp,
+            ref offset,
+            ..
+        } = item;
+        match *tag_type { // skip
+            FLVTagType::TAG_TYPE_SCRIPTDATAOBJECT => {
+                continue;
+            }
+            FLVTagType::TAG_TYPE_VIDEO => {
+                if *keyframe {
+                    let p = tag_write.get_position();
+                    positions[frame_index] = p;
+                    frame_index += 1;
+                }
+            }
+            _ => {}
+        }
+        let mut tag = item.tag(&mut file);
+        tag.set_timestamp((*timestamp + *offset) as u64);
+        tag_write.write_tag(&tag);
+    }
+
+    // write metatag
+    write_back_meta_tag(duration, &mut metatag, &times, &positions, &mut tag_write);
 }
 
 fn main() {
     let path = std::env::args().nth(1).unwrap();
     println!("checking flv: {}", path);
-    let info = get_info(&path);
+    let mut info = get_info(&path);
     // println!("{:?}", info);
-    check_offset(&info);
+    let has_gap = check_offset(&mut info);
+
+    // 有第二个参数就行
+    // let fix: bool = true;
+    let fix: bool = std::env::args().nth(2).is_some();
+    if has_gap && fix {
+        let new_info = get_fix_info(info);
+        fix_file(&path, new_info);
+    }
 }
