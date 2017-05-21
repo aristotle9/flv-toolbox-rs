@@ -4,3 +4,4 @@ extern crate xml;
 
 pub mod faad;
 pub mod lib;
+pub mod utils;

@@ -9,12 +9,14 @@ byteorder = "0.3"
 xml-rs = "0.2"
 getopts = "0.2"
 colored = "^1.5"
+libc = "0.2"
+rand = "0.3"
 
 [dependencies.ffmpeg]
 path = "../rust-ffmpeg"
 
-#[dependencies.ffmpeg-sys]
-#path = "../rust-ffmpeg-sys"
+# [dependencies.ffmpeg-sys]
+# path = "../rust-ffmpeg-sys"
 
 [lib]
 path = "src/mod.rs"
