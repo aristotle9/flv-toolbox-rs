@@ -335,15 +335,15 @@ impl FLVTag {
 
     pub fn set_objects(&mut self, vec: &Vec<Json>) {
         assert_eq!(self.get_tag_type(), FLVTagType::TAG_TYPE_SCRIPTDATAOBJECT);
-        let mut _len = 0;
-        {
-            let mut c = Cursor::new(&mut self.data[(TAG_HEADER_BYTE_COUNT as usize)..]);
-            for v in vec.iter() {
-                c.write_amf0_value(v);
-            }
-            _len = c.position();
-        }
-        self.set_data_size(_len as u32);
+        
+        let mut buf: Vec<u8> = Vec::new();
+        buf.write(&self.data[0..(TAG_HEADER_BYTE_COUNT as usize)]);
+        buf.write_amf0_value(&vec[0]);
+        buf.write_amf0_value(&vec[1]);
+        let data_size = buf.len() as u32 - TAG_HEADER_BYTE_COUNT;
+        self.data = buf;
+
+        self.set_data_size(data_size);
     }
 }
 
