@@ -1,10 +1,14 @@
 extern crate ffmpeg;
 extern crate rustc_serialize;
+extern crate getopts;
 extern crate flv_toolbox_rs;
 
 use flv_toolbox_rs::lib::{ FLVTagRead, FLVHeader, FLVTag, FLVTagType, FLVTagWrite, format_seconds_ms, AudioSpecificConfig };
 
 use rustc_serialize::json::{Json};
+use getopts::Options;
+
+use std::path::Path;
 use std::fs::File;
 use std::io::{ Read, Write, Cursor, Seek, SeekFrom };
 use std::collections::BTreeMap;
@@ -14,6 +18,7 @@ const PROGRAM_SIGN: &'static str = "audio gap fixed by timestamp-normalization, 
 type FLVInfo = Vec<TagProfile>;
 
 type Id = u64;
+const MAX_ID: u64 = std::u64::MAX;
 
 #[derive(Debug, Clone)]
 pub struct TagProfile {
@@ -76,8 +81,59 @@ impl TagProfile {
     }
 
     pub fn tag(&self, file: &mut File) -> FLVTag {
-        file.seek(SeekFrom::Start(self.position));
-        FLVTag::read(file).unwrap()
+        if self.id == MAX_ID { // generate mut audio tag
+            TagProfile::new_mute_tag(self.timestamp)
+        } else {
+            file.seek(SeekFrom::Start(self.position));
+            FLVTag::read(file).unwrap()
+        }
+    }
+
+    pub fn new_mute(timestamp: i64) -> TagProfile {
+        TagProfile::new_audio(MAX_ID, timestamp, 0, false, 23, 23)
+    }
+
+    pub fn new_mute_tag(timestamp: i64) -> FLVTag {
+        let sound_rate = 44100_f64;
+        let channels: u8 = 2;
+        let sound_size: u8 = 16; // 16 | 8
+
+        let data_list = ([0x01, 0x18, 0x20, 0x07], [0x21, 0x10, 0x04, 0x60, 0x8c, 0x1c]);
+        let data: &[u8] = if channels == 2 { &data_list.1 } else { &data_list.0 };
+        let data_size: usize = data.len() + 2;
+        let channels_index   = channels - 1; 
+        let sound_size_index = sound_size / 8 - 1;
+        let sound_rate_index = [5512.5_f64, 11025_f64, 22050_f64, 44100_f64].iter().position(|&x| x == sound_rate).unwrap() as u8;
+        let mut tag_data: Vec<u8> = Vec::with_capacity(data_size + 11 + 4);
+        
+        // tag type
+        tag_data.push(8);
+        // data size,
+        tag_data.push(((data_size >> 16) & 0xff) as u8);
+        tag_data.push(((data_size >>  8) & 0xff) as u8);
+        tag_data.push(((data_size      ) & 0xff) as u8);
+        // timestamp
+    	tag_data.push(((timestamp >> 16) & 0xff) as u8);
+    	tag_data.push(((timestamp >> 8 ) & 0xff) as u8);
+    	tag_data.push(((timestamp      ) & 0xff) as u8);
+        tag_data.push(((timestamp >> 24) & 0xff) as u8); // extended byte in unusual location
+        // stream id
+        tag_data.push(0);
+        tag_data.push(0);
+        tag_data.push(0);
+        // audio header
+        tag_data.push((10 << 4) | (sound_rate_index << 2) | (sound_size_index << 1) | channels_index);
+        tag_data.push(1);
+        // audio data
+        tag_data.extend_from_slice(data);
+        // prev size
+        tag_data.push(0);
+        tag_data.push(0);
+        tag_data.push(0);
+        tag_data.push(0);
+
+        let mut tag = FLVTag::read(&mut &*tag_data).unwrap();
+        tag
     }
 }
 
@@ -367,22 +423,111 @@ fn get_fix_info(info: FLVInfo) -> FLVInfo {
     return c_tags;
 }
 
-fn fix_file(path: &str, info: FLVInfo) {
+// 使用插入空白 audio frame 方法补齐比较大的 gap
+fn get_fix_info2(info: FLVInfo, mute_tag: TagProfile) -> FLVInfo {
+    
+    // 计算重新排列后的 Tag 布局
+    // 不能扔的Tag, 比如 metadata avc sequence header
+    let mut c_tags: Vec<TagProfile> = vec![];
+    let mut v_tags: Vec<TagProfile> = vec![];
+    let mut a_tags: Vec<TagProfile> = vec![];
+
+    for item in info.iter() {
+        let &TagProfile {
+            ref tag_type,
+            sequence_header: ref sh,
+            ..
+        } = item;
+        match *tag_type {
+            FLVTagType::TAG_TYPE_AUDIO => {
+                if *sh {
+                    c_tags.push(item.clone());
+                } else {
+                    a_tags.push(item.clone());
+                }
+            }
+            FLVTagType::TAG_TYPE_VIDEO => {
+                if *sh {
+                    c_tags.push(item.clone());
+                } else {
+                    v_tags.push(item.clone());
+                }
+            }
+            _ => {
+                c_tags.push(item.clone());
+            }
+        }
+    }
+
+    let mut j: usize = 0;
+    let mut b_tags: Vec<TagProfile> = vec![];
+    let TagProfile { decode_duration: ref mute_tag_dd, .. } = mute_tag;
+
+    let mut timeline_offset: i64 = 0;
+    let mut timeline_timestamp: i64 = 0;
+    let mut timeline_decode_duration: i64 = 0;
+//
+//   tm + offset     delta
+//   |           |<--- gap --->|
+//   +-----------+             +-----------+
+//   |dc_duration|             |           |
+//   +-----------+             +-----------+
+//   |<-------duration-------->|
+//   |<-- timeline
+//
+    for i in 0..a_tags.len() {
+        let TagProfile {
+            timestamp: ref tm,
+            ref decode_duration,
+            ref mut offset,
+            ..
+        } = a_tags[i];
+
+        let delta: i64 = (timeline_timestamp + timeline_offset + timeline_decode_duration) - (tm + timeline_offset);
+        if delta.abs() > 1 {
+            let mut gap_left = timeline_timestamp + timeline_offset + timeline_decode_duration;
+            let gap_right = *tm + timeline_offset;
+            while gap_right - gap_left >= *mute_tag_dd {
+                b_tags.push(TagProfile::new_mute(gap_left));
+                gap_left += *mute_tag_dd;
+            }
+            if gap_right - gap_left > 1 {
+                // make some offset
+                println!("remain offset {} {:>3}", format_seconds_ms(*tm as u64), gap_right - gap_left);
+            }
+        }
+        timeline_decode_duration = *decode_duration;
+        timeline_timestamp = *tm;
+        *offset = timeline_offset;
+    }
+
+    println!("b_tags len {}", b_tags.len());
+    // mux profiles
+    let mut new_profiles: Vec<TagProfile> = vec![];
+    new_profiles.append(&mut a_tags);
+    new_profiles.append(&mut b_tags);
+    new_profiles.append(&mut v_tags);
+    new_profiles.sort_by_key(|t| t.timestamp + t.offset);
+    c_tags.append(&mut new_profiles);
+    return c_tags;
+}
+
+fn fix_file(input: &str, output: &str, info: FLVInfo) {
 
     use std::io::SeekFrom::{Current, Start};
 
-    let mut file = File::open(path).unwrap();
+    let mut file = File::open(input).unwrap();
     let file_info = file.metadata().unwrap();
     let file_len = file_info.len();
     
-    let mut output_file: File = File::create(format!("{}-fixed.flv", path)).unwrap();
+    let mut output_file: File = File::create(output).unwrap();
     let mut tag_write: FLVTagWrite<File> = FLVTagWrite::new(output_file);
 
     let header = FLVHeader::read(&mut file);
     tag_write.write_header(&header);
 
     // function from flv-split
-    fn write_back_meta_tag(duration: u64, metatag: &mut FLVTag, times: &Vec<u64>, filepositions: &Vec<u64>, tag_write: &mut FLVTagWrite<File>) {
+    fn write_back_meta_tag<T: Write + Seek>(duration: u64, metatag: &mut FLVTag, times: &Vec<u64>, filepositions: &Vec<u64>, tag_write: &mut FLVTagWrite<T>) {
         let mut metas = metatag.get_objects();
         {
             metas[1].as_object_mut().unwrap().insert("duration".to_string(), Json::F64(duration as f64 / 1000.0));
@@ -443,18 +588,89 @@ fn fix_file(path: &str, info: FLVInfo) {
     write_back_meta_tag(duration, &mut metatag, &times, &positions, &mut tag_write);
 }
 
+fn print_usage(program: &str, opts: Options) {
+    let brief = format!("Usage: {} FILE [options]", program);
+    print!("{}", opts.usage(&brief));
+}
+
 fn main() {
-    let path = std::env::args().nth(1).unwrap();
-    println!("checking flv: {}", path);
-    let mut info = get_info(&path);
-    // println!("{:?}", info);
+    
+    let args: Vec<String> = std::env::args().collect();
+    let program = args[0].clone();
+
+    let mut opts = Options::new();
+    opts.optflagopt("o", "output", "output flv file", "OUTPUT");
+    opts.optflag("d", "drop-video", "fix audio gap by drop video frames");
+    opts.optflag("b", "fill-mute-audio", "fix audio gap by fill mute audio frames");
+    opts.optflag("f", "offset", "fill mute audio, also offset video frame to avoid gap");
+    opts.optflag("v", "verbose", "show more information");
+    opts.optflag("h", "help", "print this help menu");
+
+    let matches: getopts::Matches = match opts.parse(&args[1..]) {
+        Ok(m) => m,
+        Err(f) => {
+            panic!(f.to_string())
+        }
+    };
+
+    if matches.opt_present("h") {
+        print_usage(&program, opts);
+        return;
+    }
+
+    let input: String = if !matches.free.is_empty() {
+        matches.free[0].clone()
+    } else {
+        println!("no input file.");
+        print_usage(&program, opts);
+        return;
+    };
+
+    let input_path: &Path = Path::new(&input);
+    if !input_path.exists() {
+        println!("input file does not exist.");
+        print_usage(&program, opts);
+        return;
+    }
+
+    let output = match matches.opt_default("o", "") {
+        Some(c) => c,
+        _ => {
+            let file = input_path.file_stem().unwrap().to_string_lossy().to_string();
+            let mut output = input_path.with_file_name(format!("{}-fixed.flv", &file));
+            let mut i: i32 = 0;
+            while output.exists() {
+                i += 1;
+                output = input_path.with_file_name(format!("{}-fixed({}).flv", &file, i));
+            }
+            println!("no output file, use {}", output.to_str().unwrap());
+            output.to_string_lossy().to_string()
+        }
+    };
+
+    let verbose     = matches.opt_present("v");
+    let drop_mode   = matches.opt_present("d");
+    let fill_mode   = matches.opt_present("b");
+    let offset_mode = matches.opt_present("f");
+
+    println!("checking flv file: {}", input);
+    let mut info = get_info(&input);
     let has_gap = check_offset(&mut info);
 
-    // 有第二个参数就行
-    // let fix: bool = true;
-    let fix: bool = std::env::args().nth(2).is_some();
-    if has_gap && fix {
-        let new_info = get_fix_info(info);
-        fix_file(&path, new_info);
+    let fix: bool = drop_mode || fill_mode;
+    if has_gap {
+        if fix {
+            let new_info = if drop_mode {
+                get_fix_info(info)
+            } else {
+                // println!("{:?}", (TagProfile::new_mute_tag(0)));
+                get_fix_info2(info, TagProfile::new_mute(0))
+            };
+            fix_file(&input, &output, new_info);
+        } else {
+            println!("there are audio gaps, please set the fix mode (-b or -d) to fix them.");
+        }
+    } else {
+        println!("no gap.");
     }
 }

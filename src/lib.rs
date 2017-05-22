@@ -257,7 +257,7 @@ impl FLVHeader {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct FLVTag {
     data: Vec<u8>//tag without last 4 bytes
 }
