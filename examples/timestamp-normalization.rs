@@ -28,7 +28,7 @@ pub struct TagProfile {
     pub position: u64,
     pub sequence_header: bool,
     pub keyframe: bool,
-    pub decode_duration: i64,
+    pub decode_duration: i64,// duration unit may ms or us
     pub duration: i64,
     pub offset: i64,
     pub deleted: bool,
@@ -90,7 +90,8 @@ impl TagProfile {
     }
 
     pub fn new_mute(timestamp: i64) -> TagProfile {
-        TagProfile::new_audio(MAX_ID, timestamp, 0, false, 23, 23)
+        // mute tag duration'unit is us
+        TagProfile::new_audio(MAX_ID, timestamp, 0, false, (1000_000.0 * 1024.0 / 44100.0) as i64, 0)
     }
 
     pub fn new_mute_tag(timestamp: i64) -> FLVTag {
@@ -461,7 +462,7 @@ fn get_fix_info2(info: FLVInfo, mute_tag: TagProfile) -> FLVInfo {
 
     let mut j: usize = 0;
     let mut b_tags: Vec<TagProfile> = vec![];
-    let TagProfile { decode_duration: ref mute_tag_dd, .. } = mute_tag;
+    let TagProfile { decode_duration: ref mute_tag_dd_us, .. } = mute_tag;
 
     let mut timeline_offset: i64 = 0;
     let mut timeline_timestamp: i64 = 0;
@@ -485,15 +486,15 @@ fn get_fix_info2(info: FLVInfo, mute_tag: TagProfile) -> FLVInfo {
 
         let delta: i64 = (timeline_timestamp + timeline_offset + timeline_decode_duration) - (tm + timeline_offset);
         if delta.abs() > 1 {
-            let mut gap_left = timeline_timestamp + timeline_offset + timeline_decode_duration;
-            let gap_right = *tm + timeline_offset;
-            while gap_right - gap_left >= *mute_tag_dd {
-                b_tags.push(TagProfile::new_mute(gap_left));
-                gap_left += *mute_tag_dd;
+            let mut gap_left_us = (timeline_timestamp + timeline_offset + timeline_decode_duration) * 1000;
+            let gap_right_us = (*tm + timeline_offset) * 1000;
+            while gap_right_us - gap_left_us >= *mute_tag_dd_us {
+                b_tags.push(TagProfile::new_mute(gap_left_us / 1000));
+                gap_left_us += *mute_tag_dd_us;
             }
-            if gap_right - gap_left > 1 {
+            if gap_right_us - gap_left_us > 1000 {
                 // make some offset
-                println!("remain offset {} {:>3}", format_seconds_ms(*tm as u64), gap_right - gap_left);
+                println!("remain offset {} {:>3}", format_seconds_ms(*tm as u64), (gap_right_us - gap_left_us) / 1000);
             }
         }
         timeline_decode_duration = *decode_duration;
