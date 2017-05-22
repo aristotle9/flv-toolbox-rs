@@ -667,6 +667,7 @@ fn main() {
                 get_fix_info2(info, TagProfile::new_mute(0))
             };
             fix_file(&input, &output, new_info);
+            println!("flv fix complete.\nplease use `ffmpeg -i \"{}\" -acodec copy -vcodec copy \"{}\"` to get mp4 file.", &output, Path::new(&output).with_extension("mp4").to_str().unwrap());
         } else {
             println!("there are audio gaps, please set the fix mode (-b or -d) to fix them.");
         }
