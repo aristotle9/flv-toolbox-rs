@@ -29,7 +29,6 @@ pub struct TagProfile {
     pub sequence_header: bool,
     pub keyframe: bool,
     pub decode_duration: i64,// duration unit may ms or us
-    pub duration: i64,
     pub offset: i64,
     pub deleted: bool,
 }
@@ -44,13 +43,12 @@ impl TagProfile {
             sequence_header,
             keyframe,
             decode_duration: 0,
-            duration: 0,
             offset: 0,
             deleted: false,
         }
     }
 
-    pub fn new_audio(id: u64, timestamp: i64, position: u64, sequence_header: bool, decode_duration: i64, duration: i64) -> Self {
+    pub fn new_audio(id: u64, timestamp: i64, position: u64, sequence_header: bool, decode_duration: i64) -> Self {
         TagProfile {
             id,
             tag_type: FLVTagType::TAG_TYPE_AUDIO,
@@ -59,7 +57,6 @@ impl TagProfile {
             sequence_header,
             keyframe: sequence_header,
             decode_duration,
-            duration,
             offset: 0,
             deleted: false,
         }
@@ -74,7 +71,6 @@ impl TagProfile {
             sequence_header: false,
             keyframe: false,
             decode_duration: 0,
-            duration: 0,
             offset: 0,
             deleted: false,
         }
@@ -91,7 +87,7 @@ impl TagProfile {
 
     pub fn new_mute(timestamp: i64) -> TagProfile {
         // mute tag duration'unit is us
-        TagProfile::new_audio(MAX_ID, timestamp, 0, false, (1000_000.0 * 1024.0 / 44100.0) as i64, 0)
+        TagProfile::new_audio(MAX_ID, timestamp, 0, false, (1000_000.0 * 1024.0 / 44100.0) as i64)
     }
 
     pub fn new_mute_tag(timestamp: i64) -> FLVTag {
@@ -174,7 +170,7 @@ fn get_info(path: &str) -> FLVInfo {
             FLVTagType::TAG_TYPE_AUDIO => {
                 if tag.is_acc_sequence_header() { // acc sequence header
                     asc = Some(tag.get_sound_audio_specific_config());
-                    info.push(TagProfile::new_audio(id, tag.get_timestamp() as i64, position, true, 0, 0));
+                    info.push(TagProfile::new_audio(id, tag.get_timestamp() as i64, position, true, 0));
                 } else { // normal frames
                     // decode audio frame samples by ffmpeg
                     let mut audio_buffer: Vec<u8> = Vec::with_capacity(tag.get_sound_data_size() as usize + 7);
@@ -191,7 +187,7 @@ fn get_info(path: &str) -> FLVInfo {
                         duration = (1000. * frame.samples() as f64 / frame.rate() as f64) as i64;
                         // println!("{:?}", (frame.channels(), frame.rate(), frame.samples(), duration));
                     }
-                    info.push(TagProfile::new_audio(id, tag.get_timestamp() as i64, position, false, duration, 0));
+                    info.push(TagProfile::new_audio(id, tag.get_timestamp() as i64, position, false, duration));
                 }
             },
             FLVTagType::TAG_TYPE_SCRIPTDATAOBJECT => {
@@ -218,70 +214,25 @@ fn top_duration(pairs: &BTreeMap<i64, u64>) -> i64 {
 
 fn check_offset(info: &mut FLVInfo) -> bool {
 
-    let mut last_audio_id: Id = 0;
-    {// 计算实际的 frame duration
-        let mut last_audio_profile: Option<&mut TagProfile> = None;
-        for item in info.iter_mut() {
-            let mut audio = false;
-            {
-                let &mut TagProfile {
-                    ref id,
-                    ref tag_type,
-                    ref timestamp,
-                    ..
-                } = item;
-                match *tag_type {
-                    FLVTagType::TAG_TYPE_AUDIO => {
-                        if let Some(&mut TagProfile { timestamp: ref last_timestamp, ref mut duration, .. }) = last_audio_profile {
-                            *duration = *timestamp - *last_timestamp;
-                        }
-                        audio = true;
-                        last_audio_id = *id;
-                    }
-                    _ => {
-                    }
-                }
-            }
-            if audio {
-                last_audio_profile = Some(item);
-            }
-        }
-    }
-    // println!("{:?}", info.iter_mut().filter(|item| {
-    //     match item {
-    //         &&mut TagProfile::Audio(_, _, _, _, _) => {
-    //             return true;
-    //         }
-    //         _ => {
-    //             return false;
-    //         }
-    //     }
-    // }).take(10).collect::<Vec<&mut TagProfile>>());
-
-    let mut audio_time: i64 = 0;
+    let mut last_tm: i64 = 0;
+    let mut last_dd: i64 = 0;
+    let mut audio_duration: i64 = 0;
     let mut has_gap: bool = false;
-
-    for item in info.iter() {
+    for item in info.iter().filter(|&&TagProfile { ref tag_type, sequence_header: ref sh, ..}| *tag_type == FLVTagType::TAG_TYPE_AUDIO && !*sh) {
         let &TagProfile {
             ref id,
-            ref tag_type,
-            ref timestamp,
-            sequence_header: ref sh,
-            ref decode_duration,
-            ref duration,
+            timestamp: ref tm,
+            decode_duration: ref dd,
             ..
         } = item;
-        match *tag_type {
-            FLVTagType::TAG_TYPE_AUDIO => {
-                audio_time += *decode_duration;
-                if (*duration - *decode_duration).abs() > 1 && *id != last_audio_id && !*sh {// 排除最后一个Tag(容器持续时间不能确定)，SequenceHeader
-                    // 打印经过这个Tag后会发生的偏移
-                    println!("{:>8} {} {:>8}", *id, format_seconds_ms(*timestamp as u64), (audio_time + decode_duration) - (*timestamp + *duration));
-                    has_gap = true;
-                }
-            }
-            _ => {}
-        };
+        let delta: i64 = *tm - (last_tm + last_dd);
+        if delta.abs() > 1 {
+            has_gap = true;
+            println!("{:>8} {} {:>8} {:>8}", *id, format_seconds_ms(*tm as u64), delta, *tm - audio_duration);
+        }
+        audio_duration += *dd;
+        last_dd = *dd;
+        last_tm = *tm;
     }
     return has_gap;
 }
