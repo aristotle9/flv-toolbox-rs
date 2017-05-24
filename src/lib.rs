@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write, Cursor, Seek, SeekFrom};
 use self::byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use self::rustc_serialize::json::Json;
+use std::fmt;
 
 pub trait ReadAMF0Ext : ReadBytesExt {
     fn read_amf0_number(&mut self) -> Json {
@@ -359,6 +360,44 @@ pub struct AvcC {
     pub pps_array: Vec<Vec<u8>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct NalUnitInfo {
+    pub nalu_type: u8,
+    pub nalu_tag: u8,
+    pub nalu_size: u32,
+}
+
+impl fmt::Display for NalUnitInfo {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let tp  = match self.nalu_type {
+            1 => "   ", // IBP
+            5 => "IDR", // IDR
+            6 => "SEI", // SEI
+            7 => "SPS", // SPS
+            8 => "PPS", // PPS
+            _ => "Unknown Nalu Type",
+        };
+        let tag = match self.nalu_tag {
+            0b11 => "I",
+            0b10 => "P",
+            0b00 => "B",
+            _    => "X", // panic!("unknow nalu type"),
+        };
+        write!(f, "[{} {} {:>5}]", tp, tag, self.nalu_size)
+    }
+}
+
+pub struct NalUnitInfos(pub Vec<NalUnitInfo>);
+
+impl fmt::Display for NalUnitInfos {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        for info in self.0.iter() {
+            try!(write!(f, "{} ", info));
+        }
+        Ok(())
+    }
+}
+
 impl FLVTag {
     pub fn get_frame_type(&self) -> u8 {
         assert_eq!(self.get_tag_type(), FLVTagType::TAG_TYPE_VIDEO);
@@ -387,13 +426,13 @@ impl FLVTag {
         return value;
     }
 
-    pub fn get_nal_uints_info(&self) -> String { // see see what in the data
+    pub fn get_nal_uints_info(&self) -> NalUnitInfos { // see see what in the data
         
         use std::fmt::Write;
         
         assert_eq!(self.get_codec_id(), 7); // CODEC_ID_AVC
         let mut handle: Cursor<&[u8]> = Cursor::new(&self.data[(TAG_HEADER_BYTE_COUNT as usize)..]);
-        let mut ret: String = String::new();
+        let mut ret: Vec<NalUnitInfo> = Vec::new();
 
         handle.seek(SeekFrom::Start(5)); // seek to nalus
         let data_size = self.get_data_size() as u64;
@@ -402,29 +441,21 @@ impl FLVTag {
             if bytes_avaliable < 4 {
                 break;
             }
-            let nalu_size = handle.read_u32::<BigEndian>().unwrap() as u64;
-            if bytes_avaliable < 4 + nalu_size {
+            let nalu_size = handle.read_u32::<BigEndian>().unwrap();
+            if bytes_avaliable < 4 + nalu_size as u64 {
                 break;
             }
             let nalu_type = handle.read_u8().unwrap();
-            let tp  = match nalu_type & 0x1F {
-                1 => "   ", // IBP
-                5 => "IDR", // IDR
-                6 => "SEI", // SEI
-                7 => "SPS", // SPS
-                8 => "PPS", // PPS
-                _ => panic!("unknow nalu type"),
-            };
-            let tag = match ((nalu_type >> 5) & 0x3) {
-                0b11 => "I",
-                0b10 => "P",
-                0b00 => "B",
-                _    => "X", // panic!("unknow nalu type"),
-            };
-            write!(ret, "[{} {} {:>5}] ", tp, tag, nalu_size);
+            let tp  = nalu_type & 0x1F;
+            let tag = (nalu_type >> 5) & 0x3;
+            ret.push(NalUnitInfo {
+                        nalu_type: tp,
+                        nalu_tag: tag,
+                        nalu_size,
+                    });
             handle.seek(SeekFrom::Current((nalu_size as i64) - 1));
         }
-        return ret;
+        return NalUnitInfos(ret);
     }
 
     // for ffmpeg avpacket

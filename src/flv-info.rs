@@ -78,7 +78,7 @@ fn flv_info(path: &String, show_meta: bool, all_frame: bool, video_frame: bool, 
                 if tag.get_frame_type() == 1 && video_frame{// FRAME_TYPE_KEYFRAME
                     if tag.get_avc_packet_type() == 0 { // AVC_PACKET_TYPE_SEQUENCE_HEADER
                         println!("{}", format!("{:>6} | {:>10} | {:>10} | {:>6} | {:>4} | {:>2} | {:>2} | {:>2} | {:>4} | {:>6} | {:>6} | {:>6}"     , i, format_seconds_ms(tag.get_timestamp()), position, tag.get_tag_size(), tag.get_tag_type() as usize, tag.get_frame_type(), tag.get_codec_id(), tag.get_avc_packet_type(), 0, 0, 0, dts_delta).on_red());
-                        println!("{:?}", tag.get_avcc());
+                        // println!("{:?}", tag.get_avcc());
                         i += 1;
                     } else { // AVC_PACKET_TYPE_NALU
                         println!("{}", format!("{:>6} | {:>10} | {:>10} | {:>6} | {:>4} | {:>2} | {:>2} | {:>2} | {:>4} | {:>6} | {:>6} | {:>6} | {}", i, format_seconds_ms(tag.get_timestamp()), position, tag.get_tag_size(), tag.get_tag_type() as usize, tag.get_frame_type(), tag.get_codec_id(), tag.get_avc_packet_type(), tag.get_avc_composition_time_offset(), tag.get_timestamp(), (tag.get_timestamp() as i64) + (tag.get_avc_composition_time_offset() as i64), dts_delta, tag.get_nal_uints_info()).on_blue());
@@ -101,14 +101,14 @@ fn flv_info(path: &String, show_meta: bool, all_frame: bool, video_frame: bool, 
                 if tag.is_acc_sequence_header() && audio_frame {
                     println!("{}", format!("{:>6} | {:>10} | {:>10} | {:>6} | {:>4} | {:>2} | {:>2} | {:>2} | {:>4} | {:>6} | {:>6} | {:>6} | [{:>5} {:>5} {}]", i, format_seconds_ms(tag.get_timestamp()), position, tag.get_tag_size(), tag.get_tag_type() as usize, "", tag.get_sound_format(), tag.get_sound_channels(), "", tag.get_timestamp(), "", dts_delta, tag.get_sound_frame_duration(), tag.get_sound_rate(), tag.get_sound_size()).on_cyan());
                     asc = Some(tag.get_sound_audio_specific_config());
-                    println!("{:?}", asc.as_ref().unwrap());
-                    println!("{:?}", FLVTag::get_sound_adts_header_data(asc.as_ref().unwrap(), 9 + 7));
+                    // println!("{:?}", asc.as_ref().unwrap());
+                    // println!("{:?}", FLVTag::get_sound_adts_header_data(asc.as_ref().unwrap(), 9 + 7));
                     i += 1;
                 }
                 else if all_frame && audio_frame {
                     println!("{}", format!("{:>6} | {:>10} | {:>10} | {:>6} | {:>4} | {:>2} | {:>2} | {:>2} | {:>4} | {:>6} | {:>6} | {:>6} | [{:>5} {:>5} {}]", i, format_seconds_ms(tag.get_timestamp()), position, tag.get_tag_size(), tag.get_tag_type() as usize, "", tag.get_sound_format(), tag.get_sound_channels(), "", tag.get_timestamp(), "", dts_delta, tag.get_sound_frame_duration(), tag.get_sound_rate(), tag.get_sound_size()).on_yellow());
-                    println!("{:?}", FLVTag::get_sound_adts_header_data(asc.as_ref().unwrap(), tag.get_sound_data_size() + 7));
-                    println!("{:?}", tag.get_sound_data());
+                    // println!("{:?}", FLVTag::get_sound_adts_header_data(asc.as_ref().unwrap(), tag.get_sound_data_size() + 7));
+                    // println!("{:?}", tag.get_sound_data());
                     i += 1;
                 }
                 last_a_tag = Some(tag);

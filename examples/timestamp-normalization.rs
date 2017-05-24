@@ -34,7 +34,7 @@ pub struct TagProfile {
 }
 
 impl TagProfile {
-    pub fn new_video(id: u64, timestamp_us: i64, position: u64, sequence_header: bool, keyframe: bool) -> Self {
+    pub fn new_video(id: u64, timestamp_us: i64, position: u64, sequence_header: bool, keyframe: bool, pts: i64) -> Self {
         TagProfile {
             id,
             tag_type: FLVTagType::TAG_TYPE_VIDEO,
@@ -42,7 +42,7 @@ impl TagProfile {
             position,
             sequence_header,
             keyframe,
-            decode_duration_us: 0,
+            decode_duration_us: pts,
             offset_us: 0,
             deleted: false,
         }
@@ -166,7 +166,13 @@ fn get_info(path: &str) -> FLVInfo {
         
         match tag.get_tag_type() {
             FLVTagType::TAG_TYPE_VIDEO => {
-                info.push(TagProfile::new_video(id, tag.get_timestamp() as i64 * 1000, position, tag.get_frame_type() == 1 && tag.get_avc_packet_type() == 0, tag.get_frame_type() == 1));
+                let timestamp = tag.get_timestamp() as i64;
+                let sequence_header = tag.get_frame_type() == 1 && tag.get_avc_packet_type() == 0;
+                let keyframe = tag.get_frame_type() == 1;
+                let cts = if sequence_header { 0 } else { tag.get_avc_composition_time_offset() as i64 };
+                let pts = cts + timestamp;
+                info.push(TagProfile::new_video(id, timestamp * 1000, position, sequence_header, keyframe, 
+                    pts));
             },
             FLVTagType::TAG_TYPE_AUDIO => {
                 if tag.is_acc_sequence_header() { // acc sequence header
@@ -329,6 +335,11 @@ fn get_fix_info(info: FLVInfo) -> FLVInfo {
         timeline_timestamp = *tm;
         *offset_us = timeline_offset;
     }
+    // 处理剩下的v_tags
+    while j < v_tags.len() {
+        v_tags[j].offset_us = timeline_offset;
+        j += 1;
+    }
 
     // for (ref k, ref v) in delete_flags.iter() {
     //     println!("del vtag {:>6}", k);
@@ -379,7 +390,7 @@ fn get_fix_info(info: FLVInfo) -> FLVInfo {
 }
 
 // 使用插入空白 audio frame 方法补齐比较大的 gap
-fn get_fix_info2(info: FLVInfo, mute_tag: TagProfile) -> FLVInfo {
+fn get_fix_info2(info: FLVInfo, mute_tag: TagProfile, offset_mode: bool) -> FLVInfo {
     
     // 计算重新排列后的 Tag 布局
     // 不能扔的Tag, 比如 metadata avc sequence header
@@ -421,6 +432,7 @@ fn get_fix_info2(info: FLVInfo, mute_tag: TagProfile) -> FLVInfo {
     let mut timeline_offset_us: i64 = 0;
     let mut timeline_timestamp_us: i64 = 0;
     let mut timeline_decode_duration_us: i64 = 0;
+    let mut delta_acc: i64 = 0;
 //
 //   tm + offset     delta
 //   |           |<--- gap --->|
@@ -442,18 +454,99 @@ fn get_fix_info2(info: FLVInfo, mute_tag: TagProfile) -> FLVInfo {
         if delta.abs() > 1000 {
             let mut gap_left_us = timeline_timestamp_us + timeline_offset_us + timeline_decode_duration_us;
             let gap_right_us = *tm + timeline_offset_us;
-            while gap_right_us - gap_left_us >= *mute_tag_dd_us {
-                b_tags.push(TagProfile::new_mute(gap_left_us));
-                gap_left_us += *mute_tag_dd_us;
-            }
-            if gap_right_us - gap_left_us > 1000 {
-                // make some offset
-                println!("remain offset {} {:>3}", format_seconds_ms(*tm as u64 / 1000), gap_right_us - gap_left_us);
+            // offset tags
+            if offset_mode {
+                // 填充到重叠
+                while gap_right_us > gap_left_us {
+                    b_tags.push(TagProfile::new_mute(gap_left_us));
+                    gap_left_us += *mute_tag_dd_us;
+                }
+                loop {
+                    let TagProfile {
+                        timestamp_us: ref tm,
+                        ref mut offset_us,
+                        ..
+                    } = v_tags[j];
+                    if *tm + timeline_offset_us <= gap_left_us {
+                        *offset_us = timeline_offset_us;
+                        j += 1;
+                        continue;
+                    } else {
+                        break;
+                    }
+                }
+                timeline_offset_us += gap_left_us - gap_right_us; // always increase offset
+            } else {
+                if gap_right_us > gap_left_us {
+                    while gap_right_us - gap_left_us >= *mute_tag_dd_us {
+                        b_tags.push(TagProfile::new_mute(gap_left_us));
+                        gap_left_us += *mute_tag_dd_us;
+                    }
+                    if gap_right_us - gap_left_us > 1000 {
+                        println!("remain offset {} {:>3}", format_seconds_ms(*tm as u64 / 1000), gap_right_us - gap_left_us);
+                    }
+                } else {
+                    // 非 offset 模式, overlay 不能消除
+                    println!("overlay at {} {}", format_seconds_ms(*tm as u64 / 1000), gap_left_us - gap_right_us);
+                }
+                // gap accumulate
+                delta_acc += gap_right_us - gap_left_us;
+                while delta_acc >= *mute_tag_dd_us {
+                    b_tags.push(TagProfile::new_mute(gap_left_us));
+                    gap_left_us += *mute_tag_dd_us;
+                    delta_acc -= *mute_tag_dd_us;
+                    println!("accumulate gap fixed.");
+                }
             }
         }
         timeline_decode_duration_us = *decode_duration_us;
         timeline_timestamp_us = *tm;
         *offset_us = timeline_offset_us;
+    }
+    // 处理完剩下的 video
+    while j < v_tags.len() {
+        v_tags[j].offset_us = timeline_offset_us;
+        j += 1;
+    }
+
+    if offset_mode {
+        // 计算可偏移点：目前为止最大的pts帧
+        let mut max_pts: i64 = -1;
+        for item in v_tags.iter_mut() {
+            let &mut TagProfile {
+                decode_duration_us: ref pts,
+                deleted: ref mut allow_offset,
+                ..
+            } = item;
+            if *pts > max_pts {
+                *allow_offset = true;
+                max_pts = *pts;
+            }
+        }
+        // 处理 offset 帧的顺序问题: 增量的帧要从IDR帧或P帧开始
+        let mut last_offset: i64 = 0;
+        let mut delay_offset: Option<i64> = None;
+        for item in v_tags.iter_mut() {
+            let &mut TagProfile {
+                ref mut offset_us,
+                deleted: ref allow_offset,
+                ..
+            } = item;
+            if *offset_us != last_offset { // 有变化 delay_offset 永远记录最新的 offset
+                delay_offset = Some(*offset_us);
+            }
+            if *allow_offset { // 可偏移点
+                if delay_offset.is_some() { // keyframe 消除一个delay，并且更新 last_offset
+                    *offset_us = *(delay_offset.as_ref().unwrap());
+                    last_offset = *offset_us;
+                    delay_offset = None;
+                }
+            } else {
+                if delay_offset.is_some() {
+                    *offset_us = last_offset;
+                }
+            }
+        }
     }
 
     println!("b_tags len {}", b_tags.len());
@@ -619,7 +712,7 @@ fn main() {
                 get_fix_info(info)
             } else {
                 // println!("{:?}", (TagProfile::new_mute_tag(0)));
-                get_fix_info2(info, TagProfile::new_mute(0))
+                get_fix_info2(info, TagProfile::new_mute(0), offset_mode)
             };
             fix_file(&input, &output, new_info);
             println!("flv fix complete.\nplease use `ffmpeg -i \"{}\" -acodec copy -vcodec copy \"{}\"` to get mp4 file.", &output, Path::new(&output).with_extension("mp4").to_str().unwrap());
