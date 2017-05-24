@@ -214,6 +214,7 @@ fn top_duration(pairs: &BTreeMap<i64, u64>) -> i64 {
 
 fn check_offset(info: &mut FLVInfo) -> bool {
 
+    let mut last_id: u64 = 0;
     let mut last_tm: i64 = 0;
     let mut last_dd: i64 = 0;
     let mut audio_duration: i64 = 0;
@@ -228,9 +229,10 @@ fn check_offset(info: &mut FLVInfo) -> bool {
         let delta: i64 = *tm - (last_tm + last_dd);
         if delta.abs() > 1 {
             has_gap = true;
-            println!("{:>8} {} {:>8} {:>8}", *id, format_seconds_ms(*tm as u64), delta, *tm - audio_duration);
+            println!("{:>6} {} -> {:>6} {} {:>8} {:>8}", last_id, format_seconds_ms(last_tm as u64), *id, format_seconds_ms(*tm as u64), delta, *tm - audio_duration);
         }
         audio_duration += *dd;
+        last_id = *id;
         last_dd = *dd;
         last_tm = *tm;
     }
