@@ -24,73 +24,73 @@ const MAX_ID: u64 = std::u64::MAX;
 pub struct TagProfile {
     pub id: u64,
     pub tag_type: FLVTagType,
-    pub timestamp: i64,
+    pub timestamp_us: i64,
     pub position: u64,
     pub sequence_header: bool,
     pub keyframe: bool,
-    pub decode_duration: i64,// duration unit may ms or us
-    pub offset: i64,
+    pub decode_duration_us: i64,// duration unit may ms or us
+    pub offset_us: i64,
     pub deleted: bool,
 }
 
 impl TagProfile {
-    pub fn new_video(id: u64, timestamp: i64, position: u64, sequence_header: bool, keyframe: bool) -> Self {
+    pub fn new_video(id: u64, timestamp_us: i64, position: u64, sequence_header: bool, keyframe: bool) -> Self {
         TagProfile {
             id,
             tag_type: FLVTagType::TAG_TYPE_VIDEO,
-            timestamp,
+            timestamp_us,
             position,
             sequence_header,
             keyframe,
-            decode_duration: 0,
-            offset: 0,
+            decode_duration_us: 0,
+            offset_us: 0,
             deleted: false,
         }
     }
 
-    pub fn new_audio(id: u64, timestamp: i64, position: u64, sequence_header: bool, decode_duration: i64) -> Self {
+    pub fn new_audio(id: u64, timestamp_us: i64, position: u64, sequence_header: bool, decode_duration_us: i64) -> Self {
         TagProfile {
             id,
             tag_type: FLVTagType::TAG_TYPE_AUDIO,
-            timestamp,
+            timestamp_us,
             position,
             sequence_header,
             keyframe: sequence_header,
-            decode_duration,
-            offset: 0,
+            decode_duration_us,
+            offset_us: 0,
             deleted: false,
         }
     }
 
-    pub fn new_meta(id: u64, timestamp: i64, position: u64) -> Self {
+    pub fn new_meta(id: u64, timestamp_us: i64, position: u64) -> Self {
         TagProfile {
             id,
             tag_type: FLVTagType::TAG_TYPE_SCRIPTDATAOBJECT,
-            timestamp,
+            timestamp_us,
             position,
             sequence_header: false,
             keyframe: false,
-            decode_duration: 0,
-            offset: 0,
+            decode_duration_us: 0,
+            offset_us: 0,
             deleted: false,
         }
     }
 
     pub fn tag(&self, file: &mut File) -> FLVTag {
         if self.id == MAX_ID { // generate mut audio tag
-            TagProfile::new_mute_tag(self.timestamp)
+            TagProfile::new_mute_tag(self.timestamp_us)
         } else {
             file.seek(SeekFrom::Start(self.position));
             FLVTag::read(file).unwrap()
         }
     }
 
-    pub fn new_mute(timestamp: i64) -> TagProfile {
+    pub fn new_mute(timestamp_us: i64) -> TagProfile {
         // mute tag duration'unit is us
-        TagProfile::new_audio(MAX_ID, timestamp, 0, false, (1000_000.0 * 1024.0 / 44100.0) as i64)
+        TagProfile::new_audio(MAX_ID, timestamp_us, 0, false, (1000_000.0 * 1024.0 / 44100.0) as i64)
     }
 
-    pub fn new_mute_tag(timestamp: i64) -> FLVTag {
+    pub fn new_mute_tag(timestamp_us: i64) -> FLVTag {
         let sound_rate = 44100_f64;
         let channels: u8 = 2;
         let sound_size: u8 = 16; // 16 | 8
@@ -103,6 +103,7 @@ impl TagProfile {
         let sound_rate_index = [5512.5_f64, 11025_f64, 22050_f64, 44100_f64].iter().position(|&x| x == sound_rate).unwrap() as u8;
         let mut tag_data: Vec<u8> = Vec::with_capacity(data_size + 11 + 4);
         
+        let timestamp: i64 = timestamp_us / 1000;
         // tag type
         tag_data.push(8);
         // data size,
@@ -165,12 +166,12 @@ fn get_info(path: &str) -> FLVInfo {
         
         match tag.get_tag_type() {
             FLVTagType::TAG_TYPE_VIDEO => {
-                info.push(TagProfile::new_video(id, tag.get_timestamp() as i64, position, tag.get_frame_type() == 1 && tag.get_avc_packet_type() == 0, tag.get_frame_type() == 1));
+                info.push(TagProfile::new_video(id, tag.get_timestamp() as i64 * 1000, position, tag.get_frame_type() == 1 && tag.get_avc_packet_type() == 0, tag.get_frame_type() == 1));
             },
             FLVTagType::TAG_TYPE_AUDIO => {
                 if tag.is_acc_sequence_header() { // acc sequence header
                     asc = Some(tag.get_sound_audio_specific_config());
-                    info.push(TagProfile::new_audio(id, tag.get_timestamp() as i64, position, true, 0));
+                    info.push(TagProfile::new_audio(id, tag.get_timestamp() as i64 * 1000, position, true, 0));
                 } else { // normal frames
                     // decode audio frame samples by ffmpeg
                     let mut audio_buffer: Vec<u8> = Vec::with_capacity(tag.get_sound_data_size() as usize + 7);
@@ -184,14 +185,14 @@ fn get_info(path: &str) -> FLVInfo {
                     let result = decoder.decode(&packet, &mut frame).unwrap();
                     let mut duration: i64 = 0;
                     if result {
-                        duration = (1000. * frame.samples() as f64 / frame.rate() as f64) as i64;
+                        duration = (1000_000. * frame.samples() as f64 / frame.rate() as f64) as i64;
                         // println!("{:?}", (frame.channels(), frame.rate(), frame.samples(), duration));
                     }
-                    info.push(TagProfile::new_audio(id, tag.get_timestamp() as i64, position, false, duration));
+                    info.push(TagProfile::new_audio(id, tag.get_timestamp() as i64 * 1000, position, false, duration));
                 }
             },
             FLVTagType::TAG_TYPE_SCRIPTDATAOBJECT => {
-                info.push(TagProfile::new_meta(id, tag.get_timestamp() as i64, position));
+                info.push(TagProfile::new_meta(id, tag.get_timestamp() as i64 * 1000, position));
             }
         };
         id += 1;
@@ -215,26 +216,26 @@ fn top_duration(pairs: &BTreeMap<i64, u64>) -> i64 {
 fn check_offset(info: &mut FLVInfo) -> bool {
 
     let mut last_id: u64 = 0;
-    let mut last_tm: i64 = 0;
-    let mut last_dd: i64 = 0;
-    let mut audio_duration: i64 = 0;
+    let mut last_tm_us: i64 = 0;
+    let mut last_dd_us: i64 = 0;
+    let mut audio_duration_us: i64 = 0;
     let mut has_gap: bool = false;
     for item in info.iter().filter(|&&TagProfile { ref tag_type, sequence_header: ref sh, ..}| *tag_type == FLVTagType::TAG_TYPE_AUDIO && !*sh) {
         let &TagProfile {
             ref id,
-            timestamp: ref tm,
-            decode_duration: ref dd,
+            timestamp_us: ref tm,
+            decode_duration_us: ref dd,
             ..
         } = item;
-        let delta: i64 = *tm - (last_tm + last_dd);
-        if delta.abs() > 1 {
+        let delta: i64 = *tm - (last_tm_us + last_dd_us);
+        if delta.abs() > 1000 {
             has_gap = true;
-            println!("{:>6} {} -> {:>6} {} {:>8} {:>8}", last_id, format_seconds_ms(last_tm as u64), *id, format_seconds_ms(*tm as u64), delta, *tm - audio_duration);
+            println!("{:>6} {} -> {:>6} {} {:>8} {:>8}", last_id, format_seconds_ms(last_tm_us as u64 / 1000), *id, format_seconds_ms(*tm as u64 / 1000), delta, *tm - audio_duration_us);
         }
-        audio_duration += *dd;
+        audio_duration_us += *dd;
         last_id = *id;
-        last_dd = *dd;
-        last_tm = *tm;
+        last_dd_us = *dd;
+        last_tm_us = *tm;
     }
     return has_gap;
 }
@@ -290,25 +291,25 @@ fn get_fix_info(info: FLVInfo) -> FLVInfo {
 //
     for i in 0..a_tags.len() {
         let TagProfile {
-            timestamp: ref tm,
-            ref decode_duration,
-            ref mut offset,
+            timestamp_us: ref tm,
+            ref decode_duration_us,
+            ref mut offset_us,
             ..
         } = a_tags[i];
 
-        let delta: i64 = (timeline_timestamp + timeline_offset + timeline_decode_duration) - (tm + timeline_offset);
-        if delta.abs() > 1 {
+        let delta: i64 = (timeline_timestamp + timeline_offset + timeline_decode_duration) - (*tm + timeline_offset);
+        if delta.abs() > 1000 {
             let gap_left = timeline_timestamp + timeline_offset + timeline_decode_duration;
             let gap_right = *tm + timeline_offset;
             loop {
                 let TagProfile {
-                    timestamp: ref tm,
-                    ref mut offset,
+                    timestamp_us: ref tm,
+                    ref mut offset_us,
                     ref mut deleted,
                     ..
                 } = v_tags[j];
                 if *tm + timeline_offset <= gap_left {
-                    *offset = timeline_offset;
+                    *offset_us = timeline_offset;
                     j += 1;
                     continue;
                 } else {
@@ -324,9 +325,9 @@ fn get_fix_info(info: FLVInfo) -> FLVInfo {
             println!("gap {:>6} {:>6} {:>6}", gap_left, gap_right, -delta);
             timeline_offset += delta;
         }
-        timeline_decode_duration = *decode_duration;
+        timeline_decode_duration = *decode_duration_us;
         timeline_timestamp = *tm;
-        *offset = timeline_offset;
+        *offset_us = timeline_offset;
     }
 
     // for (ref k, ref v) in delete_flags.iter() {
@@ -372,7 +373,7 @@ fn get_fix_info(info: FLVInfo) -> FLVInfo {
     let mut new_profiles: Vec<TagProfile> = vec![];
     new_profiles.append(&mut a_tags);
     new_profiles.append(&mut v_tags.into_iter().filter(|t| !t.deleted).collect::<Vec<TagProfile>>());
-    new_profiles.sort_by_key(|t| t.timestamp + t.offset);
+    new_profiles.sort_by_key(|t| t.timestamp_us + t.offset_us);
     c_tags.append(&mut new_profiles);
     return c_tags;
 }
@@ -415,11 +416,11 @@ fn get_fix_info2(info: FLVInfo, mute_tag: TagProfile) -> FLVInfo {
 
     let mut j: usize = 0;
     let mut b_tags: Vec<TagProfile> = vec![];
-    let TagProfile { decode_duration: ref mute_tag_dd_us, .. } = mute_tag;
+    let TagProfile { decode_duration_us: ref mute_tag_dd_us, .. } = mute_tag;
 
-    let mut timeline_offset: i64 = 0;
-    let mut timeline_timestamp: i64 = 0;
-    let mut timeline_decode_duration: i64 = 0;
+    let mut timeline_offset_us: i64 = 0;
+    let mut timeline_timestamp_us: i64 = 0;
+    let mut timeline_decode_duration_us: i64 = 0;
 //
 //   tm + offset     delta
 //   |           |<--- gap --->|
@@ -431,28 +432,28 @@ fn get_fix_info2(info: FLVInfo, mute_tag: TagProfile) -> FLVInfo {
 //
     for i in 0..a_tags.len() {
         let TagProfile {
-            timestamp: ref tm,
-            ref decode_duration,
-            ref mut offset,
+            timestamp_us: ref tm,
+            ref decode_duration_us,
+            ref mut offset_us,
             ..
         } = a_tags[i];
 
-        let delta: i64 = (timeline_timestamp + timeline_offset + timeline_decode_duration) - (tm + timeline_offset);
-        if delta.abs() > 1 {
-            let mut gap_left_us = (timeline_timestamp + timeline_offset + timeline_decode_duration) * 1000;
-            let gap_right_us = (*tm + timeline_offset) * 1000;
+        let delta: i64 = (timeline_timestamp_us + timeline_offset_us + timeline_decode_duration_us) - (*tm + timeline_offset_us);
+        if delta.abs() > 1000 {
+            let mut gap_left_us = timeline_timestamp_us + timeline_offset_us + timeline_decode_duration_us;
+            let gap_right_us = *tm + timeline_offset_us;
             while gap_right_us - gap_left_us >= *mute_tag_dd_us {
-                b_tags.push(TagProfile::new_mute(gap_left_us / 1000));
+                b_tags.push(TagProfile::new_mute(gap_left_us));
                 gap_left_us += *mute_tag_dd_us;
             }
             if gap_right_us - gap_left_us > 1000 {
                 // make some offset
-                println!("remain offset {} {:>3}", format_seconds_ms(*tm as u64), (gap_right_us - gap_left_us) / 1000);
+                println!("remain offset {} {:>3}", format_seconds_ms(*tm as u64 / 1000), gap_right_us - gap_left_us);
             }
         }
-        timeline_decode_duration = *decode_duration;
-        timeline_timestamp = *tm;
-        *offset = timeline_offset;
+        timeline_decode_duration_us = *decode_duration_us;
+        timeline_timestamp_us = *tm;
+        *offset_us = timeline_offset_us;
     }
 
     println!("b_tags len {}", b_tags.len());
@@ -461,7 +462,7 @@ fn get_fix_info2(info: FLVInfo, mute_tag: TagProfile) -> FLVInfo {
     new_profiles.append(&mut a_tags);
     new_profiles.append(&mut b_tags);
     new_profiles.append(&mut v_tags);
-    new_profiles.sort_by_key(|t| t.timestamp + t.offset);
+    new_profiles.sort_by_key(|t| t.timestamp_us + t.offset_us);
     c_tags.append(&mut new_profiles);
     return c_tags;
 }
@@ -499,12 +500,12 @@ fn fix_file(input: &str, output: &str, info: FLVInfo) {
     // create metatag
     let times = info.iter()
         .filter(|&&TagProfile { ref tag_type, ref keyframe, .. }| *tag_type == FLVTagType::TAG_TYPE_VIDEO && *keyframe )
-        .map(|&TagProfile { timestamp: ref t, .. }| *t as u64).collect::<Vec<u64>>();
+        .map(|&TagProfile { timestamp_us: ref t, .. }| *t as u64 / 1000).collect::<Vec<u64>>();
     let mut positions: Vec<u64> = vec![0u64; times.len()];
     let mut metatag = info.iter().find(|&&TagProfile { ref tag_type, .. }| *tag_type == FLVTagType::TAG_TYPE_SCRIPTDATAOBJECT).unwrap().tag(&mut file);
     let duration = {
         let item = info.iter().filter(|&&TagProfile { ref tag_type, .. }| *tag_type == FLVTagType::TAG_TYPE_AUDIO).last().unwrap();
-        (item.timestamp + item.decode_duration) as u64
+        (item.timestamp_us + item.decode_duration_us) as u64 / 1000
     };
 
     // write metatag
@@ -516,8 +517,8 @@ fn fix_file(input: &str, output: &str, info: FLVInfo) {
         let &TagProfile {
             ref tag_type,
             ref keyframe,
-            ref timestamp,
-            ref offset,
+            ref timestamp_us,
+            ref offset_us,
             ..
         } = item;
         match *tag_type { // skip
@@ -534,7 +535,7 @@ fn fix_file(input: &str, output: &str, info: FLVInfo) {
             _ => {}
         }
         let mut tag = item.tag(&mut file);
-        tag.set_timestamp((*timestamp + *offset) as u64);
+        tag.set_timestamp((*timestamp_us + *offset_us) as u64 / 1000);
         tag_write.write_tag(&tag);
     }
 
