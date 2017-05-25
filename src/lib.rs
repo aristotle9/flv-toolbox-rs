@@ -416,7 +416,13 @@ impl FLVTag {
 
     pub fn get_avc_composition_time_offset(&self) -> i32 {
         assert_eq!(self.get_codec_id(), 7); // CODEC_ID_AVC
-        assert_eq!(self.get_avc_packet_type(), 1); // AVC_PACKET_TYPE_NALU
+        // assert_eq!(self.get_avc_packet_type(), 1); 
+        // AVC_PACKET_TYPE_SEQUENCE_HEADER 0
+        // AVC_PACKET_TYPE_NALU            1
+        // AVC_PACKET_TYPE_END_OF_SEQUENCE 2
+        if self.get_avc_packet_type() != 1 {
+            return 0;
+        }
         let mut value: i32 = (self.data[TAG_HEADER_BYTE_COUNT as usize + 2] as i32) << 16;
         value |= (self.data[TAG_HEADER_BYTE_COUNT as usize + 3] as i32) << 8;
         value |= self.data[TAG_HEADER_BYTE_COUNT as usize + 4] as i32;
