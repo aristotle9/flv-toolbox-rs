@@ -85,9 +85,14 @@ impl TagProfile {
         }
     }
 
-    pub fn new_mute(timestamp_us: i64) -> TagProfile {
+    pub fn new_mute(timestamp_us: i64, sample_rate: u32) -> TagProfile {
         // mute tag duration'unit is us
-        TagProfile::new_audio(MAX_ID, timestamp_us, 0, false, (1000_000.0 * 1024.0 / 44100.0) as i64)
+        TagProfile::new_audio(MAX_ID, timestamp_us, 0, false, (1000_000.0 * 1024.0 / sample_rate as f64) as i64)
+    }
+
+    pub fn with_timestamp_us(mut self, timestamp_us: i64) -> Self {
+        self.timestamp_us = timestamp_us;
+        self
     }
 
     pub fn new_mute_tag(timestamp_us: i64) -> FLVTag {
@@ -135,7 +140,7 @@ impl TagProfile {
     }
 }
 
-fn get_info(path: &str) -> FLVInfo {
+fn get_info(path: &str) -> (FLVInfo, u32) {
     
     let mut file = File::open(path).unwrap();
     let file_info = file.metadata().unwrap();
@@ -204,7 +209,7 @@ fn get_info(path: &str) -> FLVInfo {
         id += 1;
     }
     println!("scan complete!\r");
-    return info;
+    return (info, asc.unwrap().get_sample_rate());
 }
 
 fn top_duration(pairs: &BTreeMap<i64, u64>) -> i64 {
@@ -458,7 +463,7 @@ fn get_fix_info2(info: FLVInfo, mute_tag: TagProfile, offset_mode: bool) -> FLVI
             if offset_mode {
                 // 填充到重叠
                 while gap_right_us > gap_left_us {
-                    b_tags.push(TagProfile::new_mute(gap_left_us));
+                    b_tags.push(mute_tag.clone().with_timestamp_us(gap_left_us));
                     gap_left_us += *mute_tag_dd_us;
                 }
                 loop {
@@ -479,7 +484,7 @@ fn get_fix_info2(info: FLVInfo, mute_tag: TagProfile, offset_mode: bool) -> FLVI
             } else {
                 if gap_right_us > gap_left_us {
                     while gap_right_us - gap_left_us >= *mute_tag_dd_us {
-                        b_tags.push(TagProfile::new_mute(gap_left_us));
+                        b_tags.push(mute_tag.clone().with_timestamp_us(gap_left_us));
                         gap_left_us += *mute_tag_dd_us;
                     }
                     if gap_right_us - gap_left_us > 1000 {
@@ -492,7 +497,7 @@ fn get_fix_info2(info: FLVInfo, mute_tag: TagProfile, offset_mode: bool) -> FLVI
                 // gap accumulate
                 delta_acc += gap_right_us - gap_left_us;
                 while delta_acc >= *mute_tag_dd_us {
-                    b_tags.push(TagProfile::new_mute(gap_left_us));
+                    b_tags.push(mute_tag.clone().with_timestamp_us(gap_left_us));
                     gap_left_us += *mute_tag_dd_us;
                     delta_acc -= *mute_tag_dd_us;
                     println!("accumulate gap fixed.");
@@ -702,7 +707,7 @@ fn main() {
     let offset_mode = matches.opt_present("f");
 
     println!("checking flv file: {}", input);
-    let mut info = get_info(&input);
+    let (mut info, sample_rate) = get_info(&input);
     let has_gap = check_offset(&mut info);
 
     let fix: bool = drop_mode || fill_mode;
@@ -712,7 +717,7 @@ fn main() {
                 get_fix_info(info)
             } else {
                 // println!("{:?}", (TagProfile::new_mute_tag(0)));
-                get_fix_info2(info, TagProfile::new_mute(0), offset_mode)
+                get_fix_info2(info, TagProfile::new_mute(0, sample_rate), offset_mode)
             };
             fix_file(&input, &output, new_info);
             println!("flv fix complete.\nplease use `ffmpeg -i \"{}\" -acodec copy -vcodec copy \"{}\"` to get mp4 file.", &output, Path::new(&output).with_extension("mp4").to_str().unwrap());

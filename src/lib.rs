@@ -538,6 +538,13 @@ pub struct AudioSpecificConfig {
     channel_config: u8,
 }
 
+impl AudioSpecificConfig {
+    pub fn get_sample_rate(&self) -> u32 {
+        let rate_list: [u32; 13] = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
+        return rate_list[self.sample_index as usize];
+    }
+}
+
 const SOUND_FORMAT_LINEAR: u8 = 0;
 const SOUND_FORMAT_ADPCM: u8 = 1;
 const SOUND_FORMAT_MP3: u8 = 2;
