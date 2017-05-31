@@ -8,28 +8,9 @@ rustc-serialize = "0.3"
 byteorder = "0.3"
 xml-rs = "0.2"
 getopts = "0.2"
-colored = "^1.5"
-libc = "0.2"
-rand = "0.3"
 
 [dependencies.ffmpeg]
 path = "../rust-ffmpeg"
-# features = ["static"]
-
-# [dependencies.ffmpeg-sys]
-# path = "../rust-ffmpeg-sys"
 
 [lib]
 path = "src/mod.rs"
-
-[[bin]]
-name = "flv-info"
-path = "src/flv-info.rs"
-
-[[bin]]
-name = "flv-split"
-path = "src/flv-split.rs"
-
-[[bin]]
-name = "flv-config"
-path = "src/flv-config.rs"
