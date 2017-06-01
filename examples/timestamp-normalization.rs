@@ -162,7 +162,7 @@ fn get_info(path: &str) -> (FLVInfo, u32) {
 
     loop {
         let position = parser.get_position();
-        print!("scan progress: {: >3.0}%\r", position as f64 / file_len as f64 * 100.);
+        write!(std::io::stderr(), "scan progress: {: >3.0}%\r", position as f64 / file_len as f64 * 100.);
         let nxt: Option<FLVTag> = parser.next();
         if nxt.is_none() {
             break;
@@ -629,7 +629,7 @@ fn fix_file(input: &str, output: &str, info: FLVInfo) {
 
 fn print_usage(program: &str, opts: Options) {
     let brief = format!("Usage: {} FILE [options]", program);
-    print!("{}", opts.usage(&brief));
+    write!(std::io::stderr(), "{}", opts.usage(&brief));
 }
 
 fn main() {
