@@ -1,4 +1,3 @@
-extern crate ffmpeg;
 extern crate rustc_serialize;
 extern crate getopts;
 extern crate flv_toolbox_rs;
@@ -151,12 +150,6 @@ fn get_info(path: &str) -> (FLVInfo, u32) {
 
     let mut info: FLVInfo = Vec::new();
 
-    // ffmpeg
-    ffmpeg::init().unwrap();
-    let codec = ffmpeg::decoder::find(ffmpeg::codec::id::Id::AAC).unwrap();
-    let context = ffmpeg::codec::Context::new();
-    let opened = context.decoder().open_as(codec).unwrap();
-    let mut decoder = opened.audio().unwrap();
     // asc
     let mut asc: Option<AudioSpecificConfig> = None;
 
@@ -184,21 +177,7 @@ fn get_info(path: &str) -> (FLVInfo, u32) {
                     asc = Some(tag.get_sound_audio_specific_config());
                     info.push(TagProfile::new_audio(id, tag.get_timestamp() as i64 * 1000, position, true, 0));
                 } else { // normal frames
-                    // decode audio frame samples by ffmpeg
-                    let mut audio_buffer: Vec<u8> = Vec::with_capacity(tag.get_sound_data_size() as usize + 7);
-                    audio_buffer.write(&FLVTag::get_sound_adts_header_data(asc.as_ref().unwrap(), tag.get_sound_data_size() + 7));
-                    audio_buffer.write(&tag.get_sound_data());
-                    // println!("{:?}", audio_buffer);
-                    // break;
-
-                    let packet = ffmpeg::codec::packet::Packet::borrow(&audio_buffer);
-                    let mut frame = ffmpeg::util::frame::Audio::empty();
-                    let result = decoder.decode(&packet, &mut frame).unwrap();
-                    let mut duration: i64 = 0;
-                    if result {
-                        duration = (1000_000. * frame.samples() as f64 / frame.rate() as f64) as i64;
-                        // println!("{:?}", (frame.channels(), frame.rate(), frame.samples(), duration));
-                    }
+                    let duration: i64 = (1000. * tag.get_sound_frame_duration(asc.as_ref().unwrap())) as i64;
                     info.push(TagProfile::new_audio(id, tag.get_timestamp() as i64 * 1000, position, false, duration));
                 }
             },

@@ -596,13 +596,13 @@ impl FLVTag {
     /// frame duration = num of samples / sound_rate
     /// for aac, one frame always contains 1024 samples
     /// @return in milliseconds
-    pub fn get_sound_frame_duration(&self, asc: &AudioSpecificConfig) -> u64 {
+    pub fn get_sound_frame_duration(&self, asc: &AudioSpecificConfig) -> f64 {
         assert_eq!(self.get_tag_type(), FLVTagType::TAG_TYPE_AUDIO);
         assert_eq!(self.get_sound_format(), SOUND_FORMAT_AAC);
         if self.is_acc_sequence_header() {
-            return 0;
+            return 0.;
         }
-        return (1000. * 1024. / asc.get_sample_rate() as f64) as u64;
+        return 1000. * 1024. / asc.get_sample_rate() as f64;
     }
 
     pub fn get_sound_size(&self) -> u8 {
