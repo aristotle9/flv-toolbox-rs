@@ -12,6 +12,13 @@ use std::fs::File;
 use std::io::{ Read, Write, Cursor, Seek, SeekFrom };
 use std::collections::BTreeMap;
 
+macro_rules! println_stderr(
+    ($($arg:tt)*) => { {
+        let r = writeln!(&mut ::std::io::stderr(), $($arg)*);
+        r.expect("failed printing to stderr");
+    } }
+);
+
 const PROGRAM_SIGN: &'static str = "audio gap fixed by timestamp-normalization, 2017";
 
 type FLVInfo = Vec<TagProfile>;
@@ -187,7 +194,7 @@ fn get_info(path: &str) -> (FLVInfo, u32) {
         };
         id += 1;
     }
-    println!("scan complete!\r");
+    println_stderr!("scan complete!\r");
     return (info, asc.unwrap().get_sample_rate());
 }
 
@@ -220,7 +227,7 @@ fn check_offset(info: &mut FLVInfo) -> bool {
         let delta: i64 = *tm - (last_tm_us + last_dd_us);
         if delta.abs() > 1000 {
             has_gap = true;
-            println!("{:>6} {} -> {:>6} {} {:>8} {:>8}", last_id, format_seconds_ms(last_tm_us as u64 / 1000), *id, format_seconds_ms(*tm as u64 / 1000), delta, *tm - audio_duration_us);
+            println_stderr!("{:>6} {} -> {:>6} {} {:>8} {:>8}", last_id, format_seconds_ms(last_tm_us as u64 / 1000), *id, format_seconds_ms(*tm as u64 / 1000), delta, *tm - audio_duration_us);
         }
         audio_duration_us += *dd;
         last_id = *id;
@@ -312,7 +319,7 @@ fn get_fix_info(info: FLVInfo) -> FLVInfo {
                     }
                 }
             }
-            println!("gap {:>6} {:>6} {:>6}", gap_left, gap_right, -delta);
+            println_stderr!("gap {:>6} {:>6} {:>6}", gap_left, gap_right, -delta);
             timeline_offset += delta;
         }
         timeline_decode_duration = *decode_duration_us;
@@ -326,10 +333,10 @@ fn get_fix_info(info: FLVInfo) -> FLVInfo {
     }
 
     // for (ref k, ref v) in delete_flags.iter() {
-    //     println!("del vtag {:>6}", k);
+    //     println_stderr!("del vtag {:>6}", k);
     // }
     
-    println!("before delete by gop, {} tags would be deleted", v_tags.iter().filter(|t| t.deleted).count());
+    println_stderr!("before delete by gop, {} tags would be deleted", v_tags.iter().filter(|t| t.deleted).count());
     // del a gop when on frame has been deleted
 
     let mut for_delete_indices: Vec<usize> = vec![];
@@ -358,7 +365,7 @@ fn get_fix_info(info: FLVInfo) -> FLVInfo {
         for_delete_indices.append(&mut gop);
     }
 
-    println!("after delete by gop, {} tags would be deleted", for_delete_indices.len());
+    println_stderr!("after delete by gop, {} tags would be deleted", for_delete_indices.len());
 
     for i in for_delete_indices.into_iter() {
         v_tags[i].deleted = true;
@@ -467,11 +474,11 @@ fn get_fix_info2(info: FLVInfo, mute_tag: TagProfile, offset_mode: bool) -> FLVI
                         gap_left_us += *mute_tag_dd_us;
                     }
                     if gap_right_us - gap_left_us > 1000 {
-                        println!("remain offset {} {:>3}", format_seconds_ms(*tm as u64 / 1000), gap_right_us - gap_left_us);
+                        println_stderr!("remain offset {} {:>3}", format_seconds_ms(*tm as u64 / 1000), gap_right_us - gap_left_us);
                     }
                 } else {
                     // 非 offset 模式, overlay 不能消除
-                    println!("overlay at {} {}", format_seconds_ms(*tm as u64 / 1000), gap_left_us - gap_right_us);
+                    println_stderr!("overlay at {} {}", format_seconds_ms(*tm as u64 / 1000), gap_left_us - gap_right_us);
                 }
                 // gap accumulate
                 delta_acc += gap_right_us - gap_left_us;
@@ -479,7 +486,7 @@ fn get_fix_info2(info: FLVInfo, mute_tag: TagProfile, offset_mode: bool) -> FLVI
                     b_tags.push(mute_tag.clone().with_timestamp_us(gap_left_us));
                     gap_left_us += *mute_tag_dd_us;
                     delta_acc -= *mute_tag_dd_us;
-                    println!("accumulate gap fixed.");
+                    println_stderr!("accumulate gap fixed.");
                 }
             }
         }
@@ -533,7 +540,7 @@ fn get_fix_info2(info: FLVInfo, mute_tag: TagProfile, offset_mode: bool) -> FLVI
         }
     }
 
-    println!("b_tags len {}", b_tags.len());
+    println_stderr!("b_tags len {}", b_tags.len());
     // mux profiles
     let mut new_profiles: Vec<TagProfile> = vec![];
     new_profiles.append(&mut a_tags);
@@ -653,14 +660,14 @@ fn main() {
     let input: String = if !matches.free.is_empty() {
         matches.free[0].clone()
     } else {
-        println!("no input file.");
+        println_stderr!("no input file.");
         print_usage(&program, opts);
         return;
     };
 
     let input_path: &Path = Path::new(&input);
     if !input_path.exists() {
-        println!("input file does not exist.");
+        println_stderr!("input file does not exist.");
         print_usage(&program, opts);
         return;
     }
@@ -675,7 +682,7 @@ fn main() {
                 i += 1;
                 output = input_path.with_file_name(format!("{}-fixed({}).flv", &file, i));
             }
-            println!("no output file, use {}", output.to_str().unwrap());
+            println_stderr!("no output file, use {}", output.to_str().unwrap());
             output.to_string_lossy().to_string()
         }
     };
@@ -685,7 +692,7 @@ fn main() {
     let fill_mode   = matches.opt_present("b");
     let offset_mode = matches.opt_present("f");
 
-    println!("checking flv file: {}", input);
+    println_stderr!("checking flv file: {}", input);
     let (mut info, sample_rate) = get_info(&input);
     let has_gap = check_offset(&mut info);
 
@@ -695,15 +702,17 @@ fn main() {
             let new_info = if drop_mode {
                 get_fix_info(info)
             } else {
-                // println!("{:?}", (TagProfile::new_mute_tag(0)));
+                // println_stderr!("{:?}", (TagProfile::new_mute_tag(0)));
                 get_fix_info2(info, TagProfile::new_mute(0, sample_rate), offset_mode)
             };
             fix_file(&input, &output, new_info);
-            println!("flv fix complete.\nplease use `ffmpeg -i \"{}\" -acodec copy -vcodec copy \"{}\"` to get mp4 file.", &output, Path::new(&output).with_extension("mp4").to_str().unwrap());
+            println_stderr!("flv fix complete.\nplease use `ffmpeg -i \"{}\" -acodec copy -vcodec copy \"{}\"` to get mp4 file.", &output, Path::new(&output).with_extension("mp4").to_str().unwrap());
         } else {
-            println!("there are audio gaps, please set the fix mode (-b or -d) to fix them.");
+            println_stderr!("there are audio gaps, please set the fix mode (-b or -d) to fix them.");
         }
+        println!("1");
     } else {
-        println!("no gap.");
+        println_stderr!("no gap.");
+        println!("0");
     }
 }
