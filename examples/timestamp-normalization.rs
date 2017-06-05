@@ -146,12 +146,17 @@ impl TagProfile {
     }
 }
 
-fn get_info(path: &str) -> (FLVInfo, u32) {
+fn get_info(path: &str) -> Result<(FLVInfo, u32), String> {
     
     let mut file = File::open(path).unwrap();
     let file_info = file.metadata().unwrap();
     let file_len = file_info.len();
     let mut parser = FLVTagRead::new(&mut file);
+    
+    // 只有一路av流，不存在音画不同步
+    if !(parser.header.hasAudioTags && parser.header.hasVideoTags) {
+        return Err("only one video/audio stream.".to_string());
+    }
 
     let mut id: u64 = 0;
 
@@ -180,6 +185,9 @@ fn get_info(path: &str) -> (FLVInfo, u32) {
                     pts));
             },
             FLVTagType::TAG_TYPE_AUDIO => {
+                if tag.get_sound_format() != flv_toolbox_rs::lib::SOUND_FORMAT_AAC {
+                    return Err("sound format is not aac.".to_string());
+                }
                 if tag.is_acc_sequence_header() { // acc sequence header
                     asc = Some(tag.get_sound_audio_specific_config());
                     info.push(TagProfile::new_audio(id, tag.get_timestamp() as i64 * 1000, position, true, 0));
@@ -195,7 +203,10 @@ fn get_info(path: &str) -> (FLVInfo, u32) {
         id += 1;
     }
     println_stderr!("scan complete!\r");
-    return (info, asc.unwrap().get_sample_rate());
+    if asc.is_none() {
+        return Err("asc is none.".to_string());
+    }
+    return Ok((info, asc.unwrap().get_sample_rate()));
 }
 
 fn top_duration(pairs: &BTreeMap<i64, u64>) -> i64 {
@@ -693,7 +704,14 @@ fn main() {
     let offset_mode = matches.opt_present("f");
 
     println_stderr!("checking flv file: {}", input);
-    let (mut info, sample_rate) = get_info(&input);
+    let (mut info, sample_rate) = match get_info(&input) {
+        Ok(ret) => ret,
+        Err(msg) => {
+            println_stderr!("{}", msg);
+            println!("0");
+            return;
+        }
+    };
     let has_gap = check_offset(&mut info);
 
     let fix: bool = drop_mode || fill_mode;
