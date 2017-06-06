@@ -1,15 +1,17 @@
 extern crate rustc_serialize;
 extern crate getopts;
 extern crate flv_toolbox_rs;
+extern crate libc;
 
 use flv_toolbox_rs::lib::{ FLVTagRead, FLVHeader, FLVTag, FLVTagType, FLVTagWrite, format_seconds_ms, AudioSpecificConfig };
 
 use rustc_serialize::json::{Json};
+use rustc_serialize::{ Encodable, Encoder };
 use getopts::Options;
 
 use std::path::Path;
 use std::fs::File;
-use std::io::{ Read, Write, Cursor, Seek, SeekFrom };
+use std::io::{ Write, Seek, SeekFrom };
 use std::collections::BTreeMap;
 
 macro_rules! println_stderr(
@@ -23,7 +25,6 @@ const PROGRAM_SIGN: &'static str = "audio gap fixed by timestamp-normalization, 
 
 type FLVInfo = Vec<TagProfile>;
 
-type Id = u64;
 const MAX_ID: u64 = std::u64::MAX;
 
 #[derive(Debug, Clone)]
@@ -86,7 +87,7 @@ impl TagProfile {
         if self.id == MAX_ID { // generate mut audio tag
             TagProfile::new_mute_tag(self.timestamp_us)
         } else {
-            file.seek(SeekFrom::Start(self.position));
+            file.seek(SeekFrom::Start(self.position)).unwrap();
             FLVTag::read(file).unwrap()
         }
     }
@@ -141,7 +142,7 @@ impl TagProfile {
         tag_data.push(0);
         tag_data.push(0);
 
-        let mut tag = FLVTag::read(&mut &*tag_data).unwrap();
+        let tag = FLVTag::read(&mut &*tag_data).unwrap();
         tag
     }
 }
@@ -167,7 +168,7 @@ fn get_info(path: &str) -> Result<(FLVInfo, u32), String> {
 
     loop {
         let position = parser.get_position();
-        write!(std::io::stderr(), "scan progress: {: >3.0}%\r", position as f64 / file_len as f64 * 100.);
+        write!(std::io::stderr(), "scan progress: {: >3.0}%\r", position as f64 / file_len as f64 * 100.).unwrap();
         let nxt: Option<FLVTag> = parser.next();
         if nxt.is_none() {
             break;
@@ -209,7 +210,7 @@ fn get_info(path: &str) -> Result<(FLVInfo, u32), String> {
     return Ok((info, asc.unwrap().get_sample_rate()));
 }
 
-fn top_duration(pairs: &BTreeMap<i64, u64>) -> i64 {
+fn _top_duration(pairs: &BTreeMap<i64, u64>) -> i64 {
     let mut list: Vec<(&i64, &u64)> = pairs.iter().collect();
     match list.len() {
         0 => 0,
@@ -221,13 +222,51 @@ fn top_duration(pairs: &BTreeMap<i64, u64>) -> i64 {
     }
 }
 
-fn check_offset(info: &mut FLVInfo) -> bool {
+#[repr(C)]
+pub struct OffsetInfo {
+    id_from: libc::uint64_t,
+    tm_from: libc::int64_t,
+    id_to: libc::uint64_t,
+    tm_to: libc::int64_t,
+    current_offset: libc::int64_t,
+    total_offset: libc::int64_t,
+}
+
+impl Encodable for OffsetInfo {
+    fn encode<S: Encoder>(&self, s: &mut S) -> Result<(), S::Error> {
+        s.emit_struct("OffsetInfo", 6, |s| {
+            try!(s.emit_struct_field("id_from", 0, |s| {
+                s.emit_u64(self.id_from)
+            }));
+            try!(s.emit_struct_field("tm_from", 1, |s| {
+                s.emit_i64(self.tm_from)
+            }));
+            try!(s.emit_struct_field("id_to", 2, |s| {
+                s.emit_u64(self.id_to)
+            }));
+            try!(s.emit_struct_field("tm_to", 3, |s| {
+                s.emit_i64(self.tm_to)
+            }));
+            try!(s.emit_struct_field("current_offset", 4, |s| {
+                s.emit_i64(self.total_offset)
+            }));
+            try!(s.emit_struct_field("total_offset", 5, |s| {
+                s.emit_i64(self.total_offset)
+            }));
+            Ok(())
+        })
+    }
+}
+
+fn check_offset(info: &mut FLVInfo) -> Vec<OffsetInfo> {
 
     let mut last_id: u64 = 0;
     let mut last_tm_us: i64 = 0;
     let mut last_dd_us: i64 = 0;
     let mut audio_duration_us: i64 = 0;
-    let mut has_gap: bool = false;
+    // let mut has_gap: bool = false;
+    let mut offset_infos: Vec<OffsetInfo> = Vec::new();
+
     for item in info.iter().filter(|&&TagProfile { ref tag_type, sequence_header: ref sh, ..}| *tag_type == FLVTagType::TAG_TYPE_AUDIO && !*sh) {
         let &TagProfile {
             ref id,
@@ -237,15 +276,23 @@ fn check_offset(info: &mut FLVInfo) -> bool {
         } = item;
         let delta: i64 = *tm - (last_tm_us + last_dd_us);
         if delta.abs() > 1000 {
-            has_gap = true;
+            // has_gap = true;
             println_stderr!("{:>6} {} -> {:>6} {} {:>8} {:>8}", last_id, format_seconds_ms(last_tm_us as u64 / 1000), *id, format_seconds_ms(*tm as u64 / 1000), delta, *tm - audio_duration_us);
+            offset_infos.push( OffsetInfo {
+                id_from: last_id,
+                tm_from: last_tm_us,
+                id_to: *id,
+                tm_to: *tm,
+                current_offset: delta,
+                total_offset: *tm - audio_duration_us,
+            });
         }
         audio_duration_us += *dd;
         last_id = *id;
         last_dd_us = *dd;
         last_tm_us = *tm;
     }
-    return has_gap;
+    offset_infos
 }
 
 fn get_fix_info(info: FLVInfo) -> FLVInfo {
@@ -564,13 +611,13 @@ fn get_fix_info2(info: FLVInfo, mute_tag: TagProfile, offset_mode: bool) -> FLVI
 
 fn fix_file(input: &str, output: &str, info: FLVInfo) {
 
-    use std::io::SeekFrom::{Current, Start};
+    // use std::io::SeekFrom::{Current, Start};
 
     let mut file = File::open(input).unwrap();
-    let file_info = file.metadata().unwrap();
-    let file_len = file_info.len();
+    // let file_info = file.metadata().unwrap();
+    // let file_len = file_info.len();
     
-    let mut output_file: File = File::create(output).unwrap();
+    let output_file: File = File::create(output).unwrap();
     let mut tag_write: FLVTagWrite<File> = FLVTagWrite::new(output_file);
 
     let header = FLVHeader::read(&mut file);
@@ -640,7 +687,7 @@ fn fix_file(input: &str, output: &str, info: FLVInfo) {
 
 fn print_usage(program: &str, opts: Options) {
     let brief = format!("Usage: {} FILE [options]", program);
-    write!(std::io::stderr(), "{}", opts.usage(&brief));
+    write!(std::io::stderr(), "{}", opts.usage(&brief)).unwrap();
 }
 
 fn main() {
@@ -698,7 +745,7 @@ fn main() {
         }
     };
 
-    let verbose     = matches.opt_present("v");
+    let _verbose     = matches.opt_present("v");
     let drop_mode   = matches.opt_present("d");
     let fill_mode   = matches.opt_present("b");
     let offset_mode = matches.opt_present("f");
@@ -712,7 +759,8 @@ fn main() {
             return;
         }
     };
-    let has_gap = check_offset(&mut info);
+    let offset_infos = check_offset(&mut info);
+    let has_gap = offset_infos.len() != 0;
 
     let fix: bool = drop_mode || fill_mode;
     if has_gap {
@@ -733,4 +781,52 @@ fn main() {
         println_stderr!("no gap.");
         println!("0");
     }
+}
+
+#[no_mangle]
+pub extern fn check(input_str: *const libc::c_char) -> *mut libc::c_char {
+    use std::ffi::{ CStr, CString };
+    use std::fmt::Write;
+
+    fn code(c: i32, msg: Option<&str>, data: Option<Vec<OffsetInfo>>) -> *mut libc::c_char {
+        let mut out: String = String::new();
+        write!(out, "{{ \"code\": {}", c).unwrap();
+        if msg.is_some() {
+            write!(out, ", \"message\": {}", rustc_serialize::json::encode(msg.as_ref().unwrap()).unwrap()).unwrap();
+        }
+        if data.is_some() {
+            write!(out, ", \"data\": {}", rustc_serialize::json::encode(&data).unwrap()).unwrap();
+        }
+        write!(out, "}}").unwrap();
+        CString::new(out).unwrap().into_raw()
+    }
+
+    let input_cstr = unsafe {
+        assert!(!input_str.is_null());
+        CStr::from_ptr(input_str)
+    };
+    let input: String = input_cstr.to_string_lossy().to_string();
+    let input_path: &Path = Path::new(&input);
+    if !input_path.exists() {
+        return code(-1, Some("input file does not exist."), None);
+    }
+
+    let (mut info, _sample_rate) = match get_info(&input) {
+        Ok(ret) => ret,
+        Err(msg) => {
+            return code(-1, Some(&msg), None);
+        }
+    };
+    let offset_infos = check_offset(&mut info);
+    code(if offset_infos.len() == 0 { 0 } else { 1 }, None, Some(offset_infos))
+}
+
+#[no_mangle]
+pub extern fn check_free(ret: *mut libc::c_char) {
+    use std::ffi::CString;
+
+    unsafe {
+        if ret.is_null() { return }
+        CString::from_raw(ret)
+    };
 }
