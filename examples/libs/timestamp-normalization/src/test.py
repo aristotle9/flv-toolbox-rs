@@ -5,6 +5,19 @@ import sys, ctypes, os, json
 from ctypes import c_int32, c_char_p, c_void_p
 
 def py_check(path):
+    """
+    py_check(path) -> dict
+    {
+        code: -1 | 0 | 1, -1 error, 0 ok, 1, has gap
+        message: string, error message, optional
+        data: list of OffsetInfo, optional
+    }
+    OffsetInfo: each offset info describe a gap.
+        id_from, id_to: tag id where gap located,
+        tm_from, tm_to: timestamp where gap located,
+        current_offset: gap width
+        total_offset: gap aggregate width
+    """
     prefix = {'win32': ''}.get(sys.platform, 'lib')
     extension = {'darwin': '.dylib', 'win32': '.dll'}.get(sys.platform, '.so')
 

@@ -248,7 +248,7 @@ impl Encodable for OffsetInfo {
                 s.emit_i64(self.tm_to)
             }));
             try!(s.emit_struct_field("current_offset", 4, |s| {
-                s.emit_i64(self.total_offset)
+                s.emit_i64(self.current_offset)
             }));
             try!(s.emit_struct_field("total_offset", 5, |s| {
                 s.emit_i64(self.total_offset)
