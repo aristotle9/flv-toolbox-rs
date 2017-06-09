@@ -609,34 +609,35 @@ fn get_fix_info2(info: FLVInfo, mute_tag: TagProfile, offset_mode: bool) -> FLVI
     return c_tags;
 }
 
-fn fix_file(input: &str, output: &str, info: FLVInfo) {
+fn fix_file(input: &str, output: &str, info: FLVInfo) -> Result<(), String> {
 
     // use std::io::SeekFrom::{Current, Start};
 
-    let mut file = File::open(input).unwrap();
+    let mut file = File::open(input).map_err(|e| format!("open input file err: {}", e))?;
     // let file_info = file.metadata().unwrap();
     // let file_len = file_info.len();
     
-    let output_file: File = File::create(output).unwrap();
+    let output_file: File = File::create(output).map_err(|e| format!("creat output file err: {}", e))?;
     let mut tag_write: FLVTagWrite<File> = FLVTagWrite::new(output_file);
 
     let header = FLVHeader::read(&mut file);
     tag_write.write_header(&header);
 
     // function from flv-split
-    fn write_back_meta_tag<T: Write + Seek>(duration: u64, metatag: &mut FLVTag, times: &Vec<u64>, filepositions: &Vec<u64>, tag_write: &mut FLVTagWrite<T>) {
+    fn write_back_meta_tag<T: Write + Seek>(duration: u64, metatag: &mut FLVTag, times: &Vec<u64>, filepositions: &Vec<u64>, tag_write: &mut FLVTagWrite<T>) -> Result<(), String> {
         let mut metas = metatag.get_objects();
         {
-            metas[1].as_object_mut().unwrap().insert("duration".to_string(), Json::F64(duration as f64 / 1000.0));
+            metas[1].as_object_mut().ok_or("meta[1] is not object.".to_string())?.insert("duration".to_string(), Json::F64(duration as f64 / 1000.0));
             metas[1].as_object_mut().unwrap().insert("gapfixedby".to_string(), Json::String(PROGRAM_SIGN.to_string()));
             let key_times = Json::Array(times.iter().map(|&t| Json::F64(t as f64 / 1000.0)).collect::<Vec<Json>>());
             let key_positions = Json::Array(filepositions.iter().map(|&p| Json::F64(p as f64)).collect::<Vec<Json>>());
-            let keyframes = metas[1].as_object_mut().unwrap().get_mut("keyframes").unwrap().as_object_mut().unwrap();
+            let keyframes = metas[1].as_object_mut().unwrap().get_mut("keyframes").ok_or("meta[1].keyframes dose not exits.".to_string())?.as_object_mut().ok_or("meta[1].keyframes is not object.".to_string())?;
             keyframes.insert("times".to_string(), key_times);
             keyframes.insert("filepositions".to_string(), key_positions);
         }
         metatag.set_objects(&metas);
         tag_write.write_meta_tag(&metatag);
+        Ok(())
     }
 
     // create metatag
@@ -644,14 +645,18 @@ fn fix_file(input: &str, output: &str, info: FLVInfo) {
         .filter(|&&TagProfile { ref tag_type, ref keyframe, .. }| *tag_type == FLVTagType::TAG_TYPE_VIDEO && *keyframe )
         .map(|&TagProfile { timestamp_us: ref t, .. }| *t as u64 / 1000).collect::<Vec<u64>>();
     let mut positions: Vec<u64> = vec![0u64; times.len()];
-    let mut metatag = info.iter().find(|&&TagProfile { ref tag_type, .. }| *tag_type == FLVTagType::TAG_TYPE_SCRIPTDATAOBJECT).unwrap().tag(&mut file);
+    let mut metatag = info.iter().find(|&&TagProfile { ref tag_type, .. }| *tag_type == FLVTagType::TAG_TYPE_SCRIPTDATAOBJECT).map(|item| item.tag(&mut file));
     let duration = {
-        let item = info.iter().filter(|&&TagProfile { ref tag_type, .. }| *tag_type == FLVTagType::TAG_TYPE_AUDIO).last().unwrap();
+        let item = info.iter().filter(|&&TagProfile { ref tag_type, .. }| *tag_type == FLVTagType::TAG_TYPE_AUDIO).last().ok_or("no any audio tags.".to_string())?;
         (item.timestamp_us + item.decode_duration_us) as u64 / 1000
     };
 
-    // write metatag
-    write_back_meta_tag(duration, &mut metatag, &times, &positions, &mut tag_write);
+    if metatag.is_some() {
+        // write metatag
+        write_back_meta_tag(duration, metatag.as_mut().unwrap(), &times, &positions, &mut tag_write)?;
+    } else {
+        println_stderr!("can't find metatag, but fix is proceeding.");
+    }
 
     let mut frame_index: usize = 0;
 
@@ -681,13 +686,31 @@ fn fix_file(input: &str, output: &str, info: FLVInfo) {
         tag_write.write_tag(&tag);
     }
 
-    // write metatag
-    write_back_meta_tag(duration, &mut metatag, &times, &positions, &mut tag_write);
+    if metatag.is_some() {
+        // write metatag
+        write_back_meta_tag(duration, metatag.as_mut().unwrap(), &times, &positions, &mut tag_write)
+    } else {
+        Ok(())
+    }
 }
 
 fn print_usage(program: &str, opts: Options) {
     let brief = format!("Usage: {} FILE [options]", program);
     write!(std::io::stderr(), "{}", opts.usage(&brief)).unwrap();
+}
+
+fn return_code(code: i32, output: bool, msg: Option<&str>, data: Option<Vec<OffsetInfo>>) {
+
+    let mut out = std::io::stdout();
+    write!(out, "{{\"code\": {}", code).unwrap();
+    write!(out, ", \"output\": {}", output).unwrap();
+    if msg.is_some() {
+        write!(out, ", \"message\": {}", rustc_serialize::json::encode(msg.as_ref().unwrap()).unwrap()).unwrap();
+    }
+    if data.is_some() {
+        write!(out, ", \"data\": {}", rustc_serialize::json::encode(&data).unwrap()).unwrap();
+    }
+    write!(out, "}}\n").unwrap();
 }
 
 fn main() {
@@ -706,13 +729,14 @@ fn main() {
     let matches: getopts::Matches = match opts.parse(&args[1..]) {
         Ok(m) => m,
         Err(f) => {
-            panic!(f.to_string())
+            // panic!(f.to_string())
+            return return_code(-1, false, Some(&f.to_string()), None);
         }
     };
 
     if matches.opt_present("h") {
         print_usage(&program, opts);
-        return;
+        return return_code(-1, false, None, None);
     }
 
     let input: String = if !matches.free.is_empty() {
@@ -720,14 +744,14 @@ fn main() {
     } else {
         println_stderr!("no input file.");
         print_usage(&program, opts);
-        return;
+        return return_code(-1, false, None, None);
     };
 
     let input_path: &Path = Path::new(&input);
     if !input_path.exists() {
         println_stderr!("input file does not exist.");
         print_usage(&program, opts);
-        return;
+        return return_code(-1, false, None, None);
     }
 
     let output = match matches.opt_default("o", "") {
@@ -755,8 +779,7 @@ fn main() {
         Ok(ret) => ret,
         Err(msg) => {
             println_stderr!("{}", msg);
-            println!("0");
-            return;
+            return return_code(-1, false, Some(&msg), None);
         }
     };
     let offset_infos = check_offset(&mut info);
@@ -771,15 +794,23 @@ fn main() {
                 // println_stderr!("{:?}", (TagProfile::new_mute_tag(0)));
                 get_fix_info2(info, TagProfile::new_mute(0, sample_rate), offset_mode)
             };
-            fix_file(&input, &output, new_info);
-            println_stderr!("flv fix complete.\nplease use `ffmpeg -i \"{}\" -acodec copy -vcodec copy \"{}\"` to get mp4 file.", &output, Path::new(&output).with_extension("mp4").to_str().unwrap());
+            match fix_file(&input, &output, new_info) {
+                Ok(_) => {
+                    println_stderr!("flv fix complete.\nplease use `ffmpeg -i \"{}\" -acodec copy -vcodec copy \"{}\"` to get mp4 file.", &output, Path::new(&output).with_extension("mp4").to_str().unwrap());
+                    return return_code(1, true, None, Some(offset_infos));
+                }
+                Err(msg) => {
+                    println_stderr!("fix flv file err: {}", msg);
+                    return return_code(-1, false, Some(&msg), None);
+                }
+            };
         } else {
-            println_stderr!("there are audio gaps, please set the fix mode (-b or -d) to fix them.");
+            println_stderr!("there are audio gaps, please set the complete fix mode (-b -f) to fix them.");
+            return return_code(1, false, None, Some(offset_infos));
         }
-        println!("1");
     } else {
         println_stderr!("no gap.");
-        println!("0");
+        return return_code(0, false, None, None);
     }
 }
 
