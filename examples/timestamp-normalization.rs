@@ -612,6 +612,24 @@ fn get_fix_info2(info: FLVInfo, mute_tag: TagProfile, offset_mode: bool) -> FLVI
 fn fix_file(input: &str, output: &str, info: FLVInfo) -> Result<(), String> {
 
     // use std::io::SeekFrom::{Current, Start};
+    {
+        // do some guard
+        // avc sequence header must be 1
+        // aac sequence header must be 1
+        // metadata must be 1 or 0
+        let a_sh_len = info.iter().filter(|&&TagProfile { ref tag_type, sequence_header: ref sh, .. }| *tag_type == FLVTagType::TAG_TYPE_AUDIO && *sh).count();
+        if a_sh_len != 1 {
+            return Err(format!("audio sequence header tag count is not 1 but {}.", a_sh_len));
+        }
+        let v_sh_len = info.iter().filter(|&&TagProfile { ref tag_type, sequence_header: ref sh, .. }| *tag_type == FLVTagType::TAG_TYPE_VIDEO && *sh).count();
+        if v_sh_len != 1 {
+            return Err(format!("video sequence header tag count is not 1 but {}.", v_sh_len));
+        }
+        let m_len = info.iter().filter(|&&TagProfile { ref tag_type, .. }| *tag_type == FLVTagType::TAG_TYPE_SCRIPTDATAOBJECT).count();
+        if m_len > 1 {
+            return Err(format!("metadata tag count is not 0 or 1 but {}.", m_len));
+        }
+    }
 
     let mut file = File::open(input).map_err(|e| format!("open input file err: {}", e))?;
     // let file_info = file.metadata().unwrap();
