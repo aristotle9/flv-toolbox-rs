@@ -717,7 +717,7 @@ fn print_usage(program: &str, opts: Options) {
     write!(std::io::stderr(), "{}", opts.usage(&brief)).unwrap();
 }
 
-fn return_code(code: i32, output: bool, msg: Option<&str>, data: Option<Vec<OffsetInfo>>) {
+fn return_code(code: i32, output: bool, msg: Option<&str>, data: Option<Vec<OffsetInfo>>) -> i32 {
 
     let mut out = std::io::stdout();
     write!(out, "{{\"code\": {}", code).unwrap();
@@ -729,9 +729,15 @@ fn return_code(code: i32, output: bool, msg: Option<&str>, data: Option<Vec<Offs
         write!(out, ", \"data\": {}", rustc_serialize::json::encode(&data).unwrap()).unwrap();
     }
     write!(out, "}}\n").unwrap();
+    return code;
 }
 
 fn main() {
+    let ret: i32 = app();
+    std::process::exit(ret);
+}
+
+fn app() -> i32 {
     
     let args: Vec<String> = std::env::args().collect();
     let program = args[0].clone();
