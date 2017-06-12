@@ -671,7 +671,12 @@ fn fix_file(input: &str, output: &str, info: FLVInfo) -> Result<(), String> {
 
     if metatag.is_some() {
         // write metatag
-        write_back_meta_tag(duration, metatag.as_mut().unwrap(), &times, &positions, &mut tag_write)?;
+        match write_back_meta_tag(duration, metatag.as_mut().unwrap(), &times, &positions, &mut tag_write) {
+            Ok(_) => {},
+            Err(msg) => {
+                println_stderr!("write metatag err, but fix is proceeding: {}", msg);
+            }
+        };
     } else {
         println_stderr!("can't find metatag, but fix is proceeding.");
     }
@@ -706,10 +711,14 @@ fn fix_file(input: &str, output: &str, info: FLVInfo) -> Result<(), String> {
 
     if metatag.is_some() {
         // write metatag
-        write_back_meta_tag(duration, metatag.as_mut().unwrap(), &times, &positions, &mut tag_write)
-    } else {
-        Ok(())
+        match write_back_meta_tag(duration, metatag.as_mut().unwrap(), &times, &positions, &mut tag_write) {
+            Ok(_) => {},
+            Err(msg) => {
+                println_stderr!("write metatag err, but fix is proceeding: {}", msg);
+            }
+        };
     }
+    Ok(())
 }
 
 fn print_usage(program: &str, opts: Options) {
