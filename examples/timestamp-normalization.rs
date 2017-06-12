@@ -743,7 +743,9 @@ fn return_code(code: i32, output: bool, msg: Option<&str>, data: Option<Vec<Offs
 
 fn main() {
     let ret: i32 = app();
-    std::process::exit(ret);
+    if ret == -1 {
+        std::process::exit(ret);
+    }
 }
 
 fn app() -> i32 {
