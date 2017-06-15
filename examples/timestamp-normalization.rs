@@ -295,6 +295,16 @@ fn check_offset(info: &mut FLVInfo) -> Vec<OffsetInfo> {
     offset_infos
 }
 
+fn offset_analysis(offset_infos: &Vec<OffsetInfo>) -> (i64, i64) {
+    offset_infos.iter().fold((0, 0), |(max_offset, sum_offset), &OffsetInfo { current_offset: ref off, total_offset: ref total, .. }| {
+        (if max_offset.abs() < (*total).abs() {
+            *total
+        } else {
+            max_offset
+        } , sum_offset + (*off).abs())
+    })
+}
+
 fn get_fix_info(info: FLVInfo) -> FLVInfo {
     
     // 计算重新排列后的 Tag 布局
@@ -726,7 +736,7 @@ fn print_usage(program: &str, opts: Options) {
     write!(std::io::stderr(), "{}", opts.usage(&brief)).unwrap();
 }
 
-fn return_code(code: i32, output: bool, msg: Option<&str>, data: Option<Vec<OffsetInfo>>) -> i32 {
+fn return_code(code: i32, output: bool, msg: Option<&str>, data: Option<(Vec<OffsetInfo>, i64, i64)>) -> i32 {
 
     let mut out = std::io::stdout();
     write!(out, "{{\"code\": {}", code).unwrap();
@@ -734,9 +744,14 @@ fn return_code(code: i32, output: bool, msg: Option<&str>, data: Option<Vec<Offs
     if msg.is_some() {
         write!(out, ", \"message\": {}", rustc_serialize::json::encode(msg.as_ref().unwrap()).unwrap()).unwrap();
     }
-    if data.is_some() {
-        write!(out, ", \"data\": {}", rustc_serialize::json::encode(&data).unwrap()).unwrap();
-    }
+    match data {
+        Some((infos, max_offset, sum_offset)) => {
+            write!(out, ", \"data\": {}", rustc_serialize::json::encode(&infos).unwrap()).unwrap();
+            write!(out, ", \"max_offset\": {}", max_offset).unwrap();
+            write!(out, ", \"sum_offset\": {}", sum_offset).unwrap();
+        }
+        _ => {}
+    };
     write!(out, "}}\n").unwrap();
     return code;
 }
@@ -822,6 +837,8 @@ fn app() -> i32 {
 
     let fix: bool = drop_mode || fill_mode;
     if has_gap {
+        let (max_offset, sum_offset) = offset_analysis(&offset_infos);
+        println_stderr!("max_offset: {}, sum_offset: {}", max_offset, sum_offset);
         if fix {
             let new_info = if drop_mode {
                 get_fix_info(info)
@@ -832,7 +849,7 @@ fn app() -> i32 {
             match fix_file(&input, &output, new_info) {
                 Ok(_) => {
                     println_stderr!("flv fix complete.\nplease use `ffmpeg -i \"{}\" -acodec copy -vcodec copy \"{}\"` to get mp4 file.", &output, Path::new(&output).with_extension("mp4").to_str().unwrap());
-                    return return_code(1, true, None, Some(offset_infos));
+                    return return_code(1, true, None, Some((offset_infos, max_offset, sum_offset)));
                 }
                 Err(msg) => {
                     println_stderr!("fix flv file err: {}", msg);
@@ -841,7 +858,7 @@ fn app() -> i32 {
             };
         } else {
             println_stderr!("there are audio gaps, please set the complete fix mode (-b -f) to fix them.");
-            return return_code(1, false, None, Some(offset_infos));
+            return return_code(1, false, None, Some((offset_infos, max_offset, sum_offset)));
         }
     } else {
         println_stderr!("no gap.");
