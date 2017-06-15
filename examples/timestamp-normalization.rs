@@ -510,7 +510,7 @@ fn get_fix_info2(info: FLVInfo, mute_tag: TagProfile, offset_mode: bool) -> FLVI
                     b_tags.push(mute_tag.clone().with_timestamp_us(gap_left_us));
                     gap_left_us += *mute_tag_dd_us;
                 }
-                loop {
+                while j < v_tags.len() {
                     let TagProfile {
                         timestamp_us: ref tm,
                         ref mut offset_us,
