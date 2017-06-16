@@ -736,7 +736,7 @@ fn print_usage(program: &str, opts: Options) {
     write!(std::io::stderr(), "{}", opts.usage(&brief)).unwrap();
 }
 
-fn return_code(code: i32, output: bool, msg: Option<&str>, data: Option<(Vec<OffsetInfo>, i64, i64)>) -> i32 {
+fn return_code(code: i32, output: bool, msg: Option<&str>, data: Option<(Vec<OffsetInfo>, i64, i64)>, need_fix: Option<bool>) -> i32 {
 
     let mut out = std::io::stdout();
     write!(out, "{{\"code\": {}", code).unwrap();
@@ -752,6 +752,12 @@ fn return_code(code: i32, output: bool, msg: Option<&str>, data: Option<(Vec<Off
         }
         _ => {}
     };
+    match need_fix {
+        Some(nf) => {
+            write!(out, ", \"need_fix\": {}", nf).unwrap();
+        }
+        _ => {}
+    }
     write!(out, "}}\n").unwrap();
     return code;
 }
@@ -781,13 +787,13 @@ fn app() -> i32 {
         Ok(m) => m,
         Err(f) => {
             // panic!(f.to_string())
-            return return_code(-1, false, Some(&f.to_string()), None);
+            return return_code(-1, false, Some(&f.to_string()), None, None);
         }
     };
 
     if matches.opt_present("h") {
         print_usage(&program, opts);
-        return return_code(-1, false, None, None);
+        return return_code(-1, false, None, None, None);
     }
 
     let input: String = if !matches.free.is_empty() {
@@ -795,14 +801,14 @@ fn app() -> i32 {
     } else {
         println_stderr!("no input file.");
         print_usage(&program, opts);
-        return return_code(-1, false, None, None);
+        return return_code(-1, false, None, None, None);
     };
 
     let input_path: &Path = Path::new(&input);
     if !input_path.exists() {
         println_stderr!("input file does not exist.");
         print_usage(&program, opts);
-        return return_code(-1, false, None, None);
+        return return_code(-1, false, None, None, None);
     }
 
     let output = match matches.opt_default("o", "") {
@@ -825,8 +831,10 @@ fn app() -> i32 {
     let fill_mode   = matches.opt_present("b");
     let offset_mode = matches.opt_present("f");
 
+    let mut has_threshold: bool = false;
     let threshold = match matches.opt_default("t", "0") {
         Some(t) => {
+            has_threshold = true;
             match i64::from_str_radix(&t, 10) {
                 Ok(i) => i.abs(),
                 Err(e) => {
@@ -837,7 +845,10 @@ fn app() -> i32 {
                 }
             }
         },
-        _ => 0,
+        _ => {
+            has_threshold = false;
+            0
+        }
     };
 
     println_stderr!("checking flv file: {}", input);
@@ -845,21 +856,25 @@ fn app() -> i32 {
         Ok(ret) => ret,
         Err(msg) => {
             println_stderr!("{}", msg);
-            return return_code(-1, false, Some(&msg), None);
+            return return_code(-1, false, Some(&msg), None, None);
         }
     };
     let offset_infos = check_offset(&mut info);
     let has_gap = offset_infos.len() != 0;
 
     let fix: bool = drop_mode || fill_mode;
+    let mut need_fix: Option<bool> = None;
     if has_gap {
         let (max_offset, sum_offset) = offset_analysis(&offset_infos);
+        if has_threshold {
+            need_fix = Some(max_offset.abs() > threshold);
+        }
         println_stderr!("max_offset: {}, sum_offset: {}", max_offset, sum_offset);
         if fix {
             if max_offset.abs() < threshold {
                 let msg = format!("max_offset(abs({})) < threshold({}), no fix.", max_offset, threshold);
                 println_stderr!("{}", msg);
-                return return_code(1, false, Some(&msg), Some((offset_infos, max_offset, sum_offset))); 
+                return return_code(1, false, Some(&msg), Some((offset_infos, max_offset, sum_offset)), need_fix); 
             }
             let new_info = if drop_mode {
                 get_fix_info(info)
@@ -870,20 +885,20 @@ fn app() -> i32 {
             match fix_file(&input, &output, new_info) {
                 Ok(_) => {
                     println_stderr!("flv fix complete.\nplease use `ffmpeg -i \"{}\" -acodec copy -vcodec copy \"{}\"` to get mp4 file.", &output, Path::new(&output).with_extension("mp4").to_str().unwrap());
-                    return return_code(1, true, None, Some((offset_infos, max_offset, sum_offset)));
+                    return return_code(1, true, None, Some((offset_infos, max_offset, sum_offset)), need_fix);
                 }
                 Err(msg) => {
                     println_stderr!("fix flv file err: {}", msg);
-                    return return_code(-1, false, Some(&msg), None);
+                    return return_code(-1, false, Some(&msg), None, need_fix);
                 }
             };
         } else {
             println_stderr!("there are audio gaps, please set the complete fix mode (-b -f) to fix them.");
-            return return_code(1, false, None, Some((offset_infos, max_offset, sum_offset)));
+            return return_code(1, false, None, Some((offset_infos, max_offset, sum_offset)), need_fix);
         }
     } else {
         println_stderr!("no gap.");
-        return return_code(0, false, None, None);
+        return return_code(0, false, None, None, need_fix);
     }
 }
 
