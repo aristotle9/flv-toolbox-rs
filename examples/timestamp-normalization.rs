@@ -770,6 +770,7 @@ fn app() -> i32 {
 
     let mut opts = Options::new();
     opts.optflagopt("o", "output", "output flv file", "OUTPUT");
+    opts.optflagopt("t", "threshold", "when in fix mode, only max_offset > threshold would be fixed, in microseconds, default 0", "THRESHOLD");
     opts.optflag("d", "drop-video", "fix audio gap by drop video frames");
     opts.optflag("b", "fill-mute-audio", "fix audio gap by fill mute audio frames");
     opts.optflag("f", "offset", "fill mute audio, also offset video frame to avoid gap");
@@ -824,6 +825,21 @@ fn app() -> i32 {
     let fill_mode   = matches.opt_present("b");
     let offset_mode = matches.opt_present("f");
 
+    let threshold = match matches.opt_default("t", "0") {
+        Some(t) => {
+            match i64::from_str_radix(&t, 10) {
+                Ok(i) => i.abs(),
+                Err(e) => {
+                    if drop_mode || fill_mode || offset_mode { // fix mode
+                        println_stderr!("param threshold parse err: {}, use default 0.", e);
+                    }
+                    0
+                }
+            }
+        },
+        _ => 0,
+    };
+
     println_stderr!("checking flv file: {}", input);
     let (mut info, sample_rate) = match get_info(&input) {
         Ok(ret) => ret,
@@ -840,6 +856,11 @@ fn app() -> i32 {
         let (max_offset, sum_offset) = offset_analysis(&offset_infos);
         println_stderr!("max_offset: {}, sum_offset: {}", max_offset, sum_offset);
         if fix {
+            if max_offset.abs() < threshold {
+                let msg = format!("max_offset(abs({})) < threshold({}), no fix.", max_offset, threshold);
+                println_stderr!("{}", msg);
+                return return_code(1, false, Some(&msg), Some((offset_infos, max_offset, sum_offset))); 
+            }
             let new_info = if drop_mode {
                 get_fix_info(info)
             } else {
