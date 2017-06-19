@@ -9,6 +9,7 @@ use rustc_serialize::json::{Json};
 use rustc_serialize::{ Encodable, Encoder };
 use getopts::Options;
 
+use std::str::FromStr;
 use std::path::Path;
 use std::fs::File;
 use std::io::{ Write, Seek, SeekFrom };
@@ -258,7 +259,7 @@ impl Encodable for OffsetInfo {
     }
 }
 
-fn check_offset(info: &mut FLVInfo) -> Vec<OffsetInfo> {
+fn check_offset(info: &mut FLVInfo) -> (Vec<OffsetInfo>, i64, i64) {
 
     let mut last_id: u64 = 0;
     let mut last_tm_us: i64 = 0;
@@ -266,6 +267,7 @@ fn check_offset(info: &mut FLVInfo) -> Vec<OffsetInfo> {
     let mut audio_duration_us: i64 = 0;
     // let mut has_gap: bool = false;
     let mut offset_infos: Vec<OffsetInfo> = Vec::new();
+    let mut audio_tag_count: i64 = 0;
 
     for item in info.iter().filter(|&&TagProfile { ref tag_type, sequence_header: ref sh, ..}| *tag_type == FLVTagType::TAG_TYPE_AUDIO && !*sh) {
         let &TagProfile {
@@ -291,8 +293,10 @@ fn check_offset(info: &mut FLVInfo) -> Vec<OffsetInfo> {
         last_id = *id;
         last_dd_us = *dd;
         last_tm_us = *tm;
+        audio_tag_count += 1;
     }
-    offset_infos
+    let count = offset_infos.len() as i64;
+    (offset_infos, count, audio_tag_count)
 }
 
 fn offset_analysis(offset_infos: &Vec<OffsetInfo>) -> (i64, i64) {
@@ -736,7 +740,7 @@ fn print_usage(program: &str, opts: Options) {
     write!(std::io::stderr(), "{}", opts.usage(&brief)).unwrap();
 }
 
-fn return_code(code: i32, output: bool, msg: Option<&str>, data: Option<(Vec<OffsetInfo>, i64, i64)>, need_fix: Option<bool>) -> i32 {
+fn return_code(code: i32, output: bool, msg: Option<&str>, data: Option<(Vec<OffsetInfo>, i64, i64, i64, i64)>, need_fix: Option<bool>) -> i32 {
 
     let mut out = std::io::stdout();
     write!(out, "{{\"code\": {}", code).unwrap();
@@ -745,10 +749,13 @@ fn return_code(code: i32, output: bool, msg: Option<&str>, data: Option<(Vec<Off
         write!(out, ", \"message\": {}", rustc_serialize::json::encode(msg.as_ref().unwrap()).unwrap()).unwrap();
     }
     match data {
-        Some((infos, max_offset, sum_offset)) => {
+        Some((infos, max_offset, sum_offset, offset_tag_count, audio_tag_count)) => {
             write!(out, ", \"data\": {}", rustc_serialize::json::encode(&infos).unwrap()).unwrap();
             write!(out, ", \"max_offset\": {}", max_offset).unwrap();
             write!(out, ", \"sum_offset\": {}", sum_offset).unwrap();
+            write!(out, ", \"offset_tag_count\": {}", offset_tag_count).unwrap();
+            write!(out, ", \"audio_tag_count\": {}", audio_tag_count).unwrap();
+            write!(out, ", \"offset_rate\": {}", offset_tag_count as f64 / audio_tag_count as f64).unwrap();
         }
         _ => {}
     };
@@ -777,6 +784,7 @@ fn app() -> i32 {
     let mut opts = Options::new();
     opts.optflagopt("o", "output", "output flv file", "OUTPUT");
     opts.optflagopt("t", "threshold", "when in fix mode, only max_offset > threshold would be fixed, in microseconds, default 0", "THRESHOLD");
+    opts.optflagopt("r", "offset_rate_threshold", "when in fix mode, only offset_rate < offset_rate_threshold would be fixed, in 0-1, double number, default 0.01", "OFFSET_RATE");
     opts.optflag("d", "drop-video", "fix audio gap by drop video frames");
     opts.optflag("b", "fill-mute-audio", "fix audio gap by fill mute audio frames");
     opts.optflag("f", "offset", "fill mute audio, also offset video frame to avoid gap");
@@ -826,10 +834,11 @@ fn app() -> i32 {
         }
     };
 
-    let _verbose     = matches.opt_present("v");
+    let _verbose    = matches.opt_present("v");
     let drop_mode   = matches.opt_present("d");
     let fill_mode   = matches.opt_present("b");
     let offset_mode = matches.opt_present("f");
+    let fix_mode    = drop_mode || fill_mode || offset_mode;
 
     let mut has_threshold: bool = false;
     let threshold = match matches.opt_default("t", "0") {
@@ -838,7 +847,7 @@ fn app() -> i32 {
             match i64::from_str_radix(&t, 10) {
                 Ok(i) => i.abs(),
                 Err(e) => {
-                    if drop_mode || fill_mode || offset_mode { // fix mode
+                    if fix_mode { // fix mode
                         println_stderr!("param threshold parse err: {}, use default 0.", e);
                     }
                     0
@@ -846,8 +855,25 @@ fn app() -> i32 {
             }
         },
         _ => {
-            has_threshold = false;
             0
+        }
+    };
+
+    let offset_rate_threshold = match matches.opt_default("r", "0.01") {
+        Some(t) => {
+            has_threshold = true;
+            match f64::from_str(&t) {
+                Ok(f) => f,
+                Err(e) => {
+                    if fix_mode {
+                        println_stderr!("param offset_rate_threshold parse err: {}, use default 0.01", e);
+                    }
+                    0.01_f64
+                }
+            }
+        },
+        _ => {
+            0.01_f64
         }
     };
 
@@ -859,22 +885,27 @@ fn app() -> i32 {
             return return_code(-1, false, Some(&msg), None, None);
         }
     };
-    let offset_infos = check_offset(&mut info);
+    let (offset_infos, offset_tag_count, audio_tag_count) = check_offset(&mut info);
+    let offset_rate = offset_tag_count as f64 / audio_tag_count as f64;
     let has_gap = offset_infos.len() != 0;
 
-    let fix: bool = drop_mode || fill_mode;
     let mut need_fix: Option<bool> = None;
     if has_gap {
         let (max_offset, sum_offset) = offset_analysis(&offset_infos);
         if has_threshold {
-            need_fix = Some(max_offset.abs() > threshold);
+            need_fix = Some(max_offset.abs() > threshold && offset_rate <= offset_rate_threshold);
         }
-        println_stderr!("max_offset: {}, sum_offset: {}", max_offset, sum_offset);
-        if fix {
+        println_stderr!("max_offset: {}, sum_offset: {}, offset_rate: {:.6}, offset_rate_threshold: {:.6}", max_offset, sum_offset, offset_rate, offset_rate_threshold);
+        if fix_mode {
             if max_offset.abs() < threshold {
                 let msg = format!("max_offset(abs({})) < threshold({}), no fix.", max_offset, threshold);
                 println_stderr!("{}", msg);
-                return return_code(1, false, Some(&msg), Some((offset_infos, max_offset, sum_offset)), need_fix); 
+                return return_code(1, false, Some(&msg), Some((offset_infos, max_offset, sum_offset, offset_tag_count, audio_tag_count)), need_fix); 
+            }
+            if offset_rate > offset_rate_threshold {
+                let msg = format!("offset_rate({}) < offset_rate_threshold({}), no fix.", offset_rate, offset_rate_threshold);
+                println_stderr!("{}", msg);
+                return return_code(1, false, Some(&msg), Some((offset_infos, max_offset, sum_offset, offset_tag_count, audio_tag_count)), need_fix); 
             }
             let new_info = if drop_mode {
                 get_fix_info(info)
@@ -885,7 +916,7 @@ fn app() -> i32 {
             match fix_file(&input, &output, new_info) {
                 Ok(_) => {
                     println_stderr!("flv fix complete.\nplease use `ffmpeg -i \"{}\" -acodec copy -vcodec copy \"{}\"` to get mp4 file.", &output, Path::new(&output).with_extension("mp4").to_str().unwrap());
-                    return return_code(1, true, None, Some((offset_infos, max_offset, sum_offset)), need_fix);
+                    return return_code(1, true, None, Some((offset_infos, max_offset, sum_offset, offset_tag_count, audio_tag_count)), need_fix);
                 }
                 Err(msg) => {
                     println_stderr!("fix flv file err: {}", msg);
@@ -894,7 +925,7 @@ fn app() -> i32 {
             };
         } else {
             println_stderr!("there are audio gaps, please set the complete fix mode (-b -f) to fix them.");
-            return return_code(1, false, None, Some((offset_infos, max_offset, sum_offset)), need_fix);
+            return return_code(1, false, None, Some((offset_infos, max_offset, sum_offset, offset_tag_count, audio_tag_count)), need_fix);
         }
     } else {
         println_stderr!("no gap.");
@@ -936,7 +967,7 @@ pub extern fn check(input_str: *const libc::c_char) -> *mut libc::c_char {
             return code(-1, Some(&msg), None);
         }
     };
-    let offset_infos = check_offset(&mut info);
+    let (offset_infos, _, _) = check_offset(&mut info);
     code(if offset_infos.len() == 0 { 0 } else { 1 }, None, Some(offset_infos))
 }
 
