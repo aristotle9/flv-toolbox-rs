@@ -538,10 +538,10 @@ impl FLVTag {
 
 #[derive(Debug, Clone)]
 pub struct AudioSpecificConfig {
-    original_audio_object_type: u8,
-    audio_object_type: u8,
-    sample_index: u8,
-    channel_config: u8,
+    pub original_audio_object_type: u8,
+    pub audio_object_type: u8,
+    pub sample_index: u8,
+    pub channel_config: u8,
 }
 
 impl AudioSpecificConfig {

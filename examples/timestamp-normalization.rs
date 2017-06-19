@@ -33,7 +33,7 @@ pub struct TagProfile {
     pub id: u64,
     pub tag_type: FLVTagType,
     pub timestamp_us: i64,
-    pub position: u64,
+    pub position: u64, // position or channels for mute_tag
     pub sequence_header: bool,
     pub keyframe: bool,
     pub decode_duration_us: i64,// duration unit may ms or us
@@ -86,16 +86,16 @@ impl TagProfile {
 
     pub fn tag(&self, file: &mut File) -> FLVTag {
         if self.id == MAX_ID { // generate mut audio tag
-            TagProfile::new_mute_tag(self.timestamp_us)
+            TagProfile::new_mute_tag(self.timestamp_us, self.position as u8)
         } else {
             file.seek(SeekFrom::Start(self.position)).unwrap();
             FLVTag::read(file).unwrap()
         }
     }
 
-    pub fn new_mute(timestamp_us: i64, sample_rate: u32) -> TagProfile {
+    pub fn new_mute(timestamp_us: i64, sample_rate: u32, channels: u8) -> TagProfile {
         // mute tag duration'unit is us
-        TagProfile::new_audio(MAX_ID, timestamp_us, 0, false, (1000_000.0 * 1024.0 / sample_rate as f64) as i64)
+        TagProfile::new_audio(MAX_ID, timestamp_us, channels as u64, false, (1000_000.0 * 1024.0 / sample_rate as f64) as i64)
     }
 
     pub fn with_timestamp_us(mut self, timestamp_us: i64) -> Self {
@@ -103,9 +103,8 @@ impl TagProfile {
         self
     }
 
-    pub fn new_mute_tag(timestamp_us: i64) -> FLVTag {
+    pub fn new_mute_tag(timestamp_us: i64, channels: u8) -> FLVTag {
         let sound_rate = 44100_f64;
-        let channels: u8 = 2;
         let sound_size: u8 = 16; // 16 | 8
 
         let data_list = ([0x01, 0x18, 0x20, 0x07], [0x21, 0x10, 0x04, 0x60, 0x8c, 0x1c]);
@@ -148,7 +147,7 @@ impl TagProfile {
     }
 }
 
-fn get_info(path: &str) -> Result<(FLVInfo, u32), String> {
+fn get_info(path: &str) -> Result<(FLVInfo, u32, u8), String> {
     
     let mut file = File::open(path).unwrap();
     let file_info = file.metadata().unwrap();
@@ -205,10 +204,10 @@ fn get_info(path: &str) -> Result<(FLVInfo, u32), String> {
         id += 1;
     }
     println_stderr!("scan complete!\r");
-    if asc.is_none() {
-        return Err("asc is none.".to_string());
+    match asc {
+        None => Err("asc is none.".to_string()),
+        Some(asc) => Ok((info, asc.get_sample_rate(), asc.channel_config))
     }
-    return Ok((info, asc.unwrap().get_sample_rate()));
 }
 
 fn _top_duration(pairs: &BTreeMap<i64, u64>) -> i64 {
@@ -878,7 +877,7 @@ fn app() -> i32 {
     };
 
     println_stderr!("checking flv file: {}", input);
-    let (mut info, sample_rate) = match get_info(&input) {
+    let (mut info, sample_rate, channels) = match get_info(&input) {
         Ok(ret) => ret,
         Err(msg) => {
             println_stderr!("{}", msg);
@@ -911,7 +910,7 @@ fn app() -> i32 {
                 get_fix_info(info)
             } else {
                 // println_stderr!("{:?}", (TagProfile::new_mute_tag(0)));
-                get_fix_info2(info, TagProfile::new_mute(0, sample_rate), offset_mode)
+                get_fix_info2(info, TagProfile::new_mute(0, sample_rate, channels), offset_mode)
             };
             match fix_file(&input, &output, new_info) {
                 Ok(_) => {
@@ -961,7 +960,7 @@ pub extern fn check(input_str: *const libc::c_char) -> *mut libc::c_char {
         return code(-1, Some("input file does not exist."), None);
     }
 
-    let (mut info, _sample_rate) = match get_info(&input) {
+    let (mut info, _sample_rate, _) = match get_info(&input) {
         Ok(ret) => ret,
         Err(msg) => {
             return code(-1, Some(&msg), None);
