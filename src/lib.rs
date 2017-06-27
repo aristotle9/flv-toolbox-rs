@@ -415,7 +415,7 @@ impl FLVTag {
     }
 
     pub fn get_avc_composition_time_offset(&self) -> i32 {
-        assert_eq!(self.get_codec_id(), 7); // CODEC_ID_AVC
+        assert!(self.get_codec_id() == 7 || self.get_codec_id() == 12); // CODEC_ID_AVC
         // assert_eq!(self.get_avc_packet_type(), 1); 
         // AVC_PACKET_TYPE_SEQUENCE_HEADER 0
         // AVC_PACKET_TYPE_NALU            1
@@ -436,7 +436,7 @@ impl FLVTag {
         
         use std::fmt::Write;
         
-        assert_eq!(self.get_codec_id(), 7); // CODEC_ID_AVC
+        assert!(self.get_codec_id() == 7 || self.get_codec_id() == 12); // CODEC_ID_AVC
         let mut handle: Cursor<&[u8]> = Cursor::new(&self.data[(TAG_HEADER_BYTE_COUNT as usize)..]);
         let mut ret: Vec<NalUnitInfo> = Vec::new();
 
