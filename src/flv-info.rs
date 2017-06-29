@@ -15,8 +15,12 @@ mod crc32;
 use crc32::Crc32;
 
 fn print_metatag(json: &Json) -> Result<(), Option<String>> {
-    let event_name = json.as_array().ok_or(None)?[0].as_string().ok_or(None)?;
-    let obj = &json.as_array().ok_or(None)?[1];
+    let event_name = json.as_array().ok_or(Some("meta is not array".to_string()))?[0].as_string().ok_or(Some("arr[0] is not string.".to_string()))?;
+    println!("metadata: {}", event_name);
+
+    let obj = &json.as_array().ok_or(Some("arr[1] is not array".to_string()))?[1];
+    println!("{}", rustc_serialize::json::as_pretty_json(&obj));
+
     let times = obj.find_path(&["keyframes", "times"]).ok_or(None)?.as_array().ok_or(None)?;
     let times: Vec<f64> = times.iter().map(|val: &Json| {
         val.as_f64().unwrap()
@@ -26,8 +30,6 @@ fn print_metatag(json: &Json) -> Result<(), Option<String>> {
         val.as_f64().unwrap() as u64
     }).collect();
 
-    println!("metadata: {}", event_name);
-    println!("{}", rustc_serialize::json::as_pretty_json(&obj));
     for (i, (t, p)) in (0u32..).zip(times.iter().zip(filepositions.iter())) {
         println!("{:3} {} {:8}", i, format_seconds_ms((t * 1000f64) as u64), p);
     }
@@ -116,7 +118,12 @@ fn flv_info(path: &String, show_meta: bool, all_frame: bool, video_frame: bool, 
             FLVTagType::TAG_TYPE_SCRIPTDATAOBJECT => {
                 println!("{:>6} | {:>10} | {:>10} | {:>6} | {:>4} | {:>2} | {:>2} | {:>2}", i, format_seconds_ms(tag.get_timestamp()), position, tag.get_tag_size(), tag.get_tag_type() as usize, "", "", "");
                 if show_meta {
-                    print_metatag(&Json::Array(tag.get_objects()));
+                    match print_metatag(&Json::Array(tag.get_objects())) {
+                        Ok(_) => {}
+                        Err(s) => {
+                            println!("print meta err: {:?}", s);
+                        }
+                    }
                 }
                 i += 1;
             }
