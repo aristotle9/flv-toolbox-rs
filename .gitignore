@@ -1,2 +1,13 @@
 target
 Cargo.lock
+*.flv
+*.mp4
+*.aac
+*.h264
+*.json
+*.txt
+*.zip
+dist/
+bin/
+videos
+.vscode/
