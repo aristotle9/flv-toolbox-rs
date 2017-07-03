@@ -27,7 +27,7 @@ pub trait ReadAMF0Ext : ReadBytesExt {
         let mut handle = self.take(len as u64);
         let read_len = handle.read_to_end(&mut buffer).unwrap();
         assert_eq!(len, read_len);
-        String::from_utf8(buffer).unwrap()
+        String::from_utf8_lossy(&buffer).to_string()
     }
 
     fn read_amf0_ecma_array(&mut self) -> Json {
