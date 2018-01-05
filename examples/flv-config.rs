@@ -2,11 +2,10 @@ extern crate rustc_serialize;
 extern crate getopts;
 extern crate byteorder;
 extern crate xml;
-
-mod lib;
+extern crate flv_toolbox_rs;
 
 use std::io::Write;
-use lib::{FLVTag, write_flv_config};
+use flv_toolbox_rs::lib::{FLVTag, write_flv_config};
 
 use getopts::Options;
 

@@ -1,5 +1,5 @@
 [package]
-name = "flv-toolbox-rs"
+name = "timestamp-normalization"
 version = "0.1.0"
 authors = ["aristotle9 <lanfan.1987@gmail.com>"]
 
@@ -8,9 +8,12 @@ rustc-serialize = "0.3"
 byteorder = "0.3"
 xml-rs = "0.2"
 getopts = "0.2"
-colored = "1.6"
 libc = "0.2.0"
-rand = "0.3"
+
+[dependencies.flv-toolbox-rs]
+path = "../../../"
 
 [lib]
-path = "src/mod.rs"
+name = "timestamp_normalization"
+path = "src/lib.rs"
+crate-type = ["dylib"]

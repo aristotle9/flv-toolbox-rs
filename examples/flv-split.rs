@@ -2,14 +2,14 @@
 extern crate rustc_serialize;
 extern crate getopts;
 extern crate xml;
+extern crate flv_toolbox_rs;
 
 use std::fs::File;
 
 use rustc_serialize::json::{Json, ToJson};
 use getopts::Options;
 
-mod lib;
-use lib::*;
+use flv_toolbox_rs::lib::*;
 
 const PROGRAM_SIGN: &'static str = "modified by flv-split, 2015";
 

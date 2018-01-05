@@ -3,16 +3,14 @@ extern crate rustc_serialize;
 extern crate getopts;
 extern crate xml;
 extern crate colored;
+extern crate flv_toolbox_rs;
 
 use colored::*;
 use rustc_serialize::json::Json;
 use getopts::Options;
 
-mod lib;
-use lib::*;
-
-mod crc32;
-use crc32::Crc32;
+use flv_toolbox_rs::lib::*;
+use flv_toolbox_rs::crc32::Crc32;
 
 fn print_metatag(json: &Json) -> Result<(), Option<String>> {
     let event_name = json.as_array().ok_or(Some("meta is not array".to_string()))?[0].as_string().ok_or(Some("arr[0] is not string.".to_string()))?;

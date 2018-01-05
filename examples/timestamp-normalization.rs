@@ -1,23 +1,24 @@
-extern crate ffmpeg;
 extern crate rustc_serialize;
 extern crate getopts;
 extern crate flv_toolbox_rs;
+extern crate libc;
 
 use flv_toolbox_rs::lib::{ FLVTagRead, FLVHeader, FLVTag, FLVTagType, FLVTagWrite, format_seconds_ms, AudioSpecificConfig };
 
 use rustc_serialize::json::{Json};
+use rustc_serialize::{ Encodable, Encoder };
 use getopts::Options;
 
+use std::str::FromStr;
 use std::path::Path;
 use std::fs::File;
-use std::io::{ Read, Write, Cursor, Seek, SeekFrom };
+use std::io::{ Write, Seek, SeekFrom };
 use std::collections::BTreeMap;
 
 const PROGRAM_SIGN: &'static str = "audio gap fixed by timestamp-normalization, 2017";
 
 type FLVInfo = Vec<TagProfile>;
 
-type Id = u64;
 const MAX_ID: u64 = std::u64::MAX;
 
 #[derive(Debug, Clone)]
@@ -25,7 +26,7 @@ pub struct TagProfile {
     pub id: u64,
     pub tag_type: FLVTagType,
     pub timestamp_us: i64,
-    pub position: u64,
+    pub position: u64, // position or channels for mute_tag
     pub sequence_header: bool,
     pub keyframe: bool,
     pub decode_duration_us: i64,// duration unit may ms or us
@@ -78,16 +79,16 @@ impl TagProfile {
 
     pub fn tag(&self, file: &mut File) -> FLVTag {
         if self.id == MAX_ID { // generate mut audio tag
-            TagProfile::new_mute_tag(self.timestamp_us)
+            TagProfile::new_mute_tag(self.timestamp_us, self.position as u8)
         } else {
-            file.seek(SeekFrom::Start(self.position));
+            file.seek(SeekFrom::Start(self.position)).unwrap();
             FLVTag::read(file).unwrap()
         }
     }
 
-    pub fn new_mute(timestamp_us: i64, sample_rate: u32) -> TagProfile {
+    pub fn new_mute(timestamp_us: i64, sample_rate: u32, channels: u8) -> TagProfile {
         // mute tag duration'unit is us
-        TagProfile::new_audio(MAX_ID, timestamp_us, 0, false, (1000_000.0 * 1024.0 / sample_rate as f64) as i64)
+        TagProfile::new_audio(MAX_ID, timestamp_us, channels as u64, false, (1000_000.0 * 1024.0 / sample_rate as f64) as i64)
     }
 
     pub fn with_timestamp_us(mut self, timestamp_us: i64) -> Self {
@@ -95,9 +96,8 @@ impl TagProfile {
         self
     }
 
-    pub fn new_mute_tag(timestamp_us: i64) -> FLVTag {
+    pub fn new_mute_tag(timestamp_us: i64, channels: u8) -> FLVTag {
         let sound_rate = 44100_f64;
-        let channels: u8 = 2;
         let sound_size: u8 = 16; // 16 | 8
 
         let data_list = ([0x01, 0x18, 0x20, 0x07], [0x21, 0x10, 0x04, 0x60, 0x8c, 0x1c]);
@@ -135,34 +135,33 @@ impl TagProfile {
         tag_data.push(0);
         tag_data.push(0);
 
-        let mut tag = FLVTag::read(&mut &*tag_data).unwrap();
+        let tag = FLVTag::read(&mut &*tag_data).unwrap();
         tag
     }
 }
 
-fn get_info(path: &str) -> (FLVInfo, u32) {
+fn get_info(path: &str) -> Result<(FLVInfo, u32, u8), String> {
     
     let mut file = File::open(path).unwrap();
     let file_info = file.metadata().unwrap();
     let file_len = file_info.len();
     let mut parser = FLVTagRead::new(&mut file);
+    
+    // 只有一路av流，不存在音画不同步
+    if !(parser.header.hasAudioTags && parser.header.hasVideoTags) {
+        return Err("only one video/audio stream.".to_string());
+    }
 
     let mut id: u64 = 0;
 
     let mut info: FLVInfo = Vec::new();
 
-    // ffmpeg
-    ffmpeg::init().unwrap();
-    let codec = ffmpeg::decoder::find(ffmpeg::codec::id::Id::AAC).unwrap();
-    let context = ffmpeg::codec::Context::new();
-    let opened = context.decoder().open_as(codec).unwrap();
-    let mut decoder = opened.audio().unwrap();
     // asc
     let mut asc: Option<AudioSpecificConfig> = None;
 
     loop {
         let position = parser.get_position();
-        print!("scan progress: {: >3.0}%\r", position as f64 / file_len as f64 * 100.);
+        write!(std::io::stderr(), "scan progress: {: >3.0}%\r", position as f64 / file_len as f64 * 100.).unwrap();
         let nxt: Option<FLVTag> = parser.next();
         if nxt.is_none() {
             break;
@@ -180,25 +179,14 @@ fn get_info(path: &str) -> (FLVInfo, u32) {
                     pts));
             },
             FLVTagType::TAG_TYPE_AUDIO => {
+                if tag.get_sound_format() != flv_toolbox_rs::lib::SOUND_FORMAT_AAC {
+                    return Err("sound format is not aac.".to_string());
+                }
                 if tag.is_acc_sequence_header() { // acc sequence header
                     asc = Some(tag.get_sound_audio_specific_config());
                     info.push(TagProfile::new_audio(id, tag.get_timestamp() as i64 * 1000, position, true, 0));
                 } else { // normal frames
-                    // decode audio frame samples by ffmpeg
-                    let mut audio_buffer: Vec<u8> = Vec::with_capacity(tag.get_sound_data_size() as usize + 7);
-                    audio_buffer.write(&FLVTag::get_sound_adts_header_data(asc.as_ref().unwrap(), tag.get_sound_data_size() + 7));
-                    audio_buffer.write(&tag.get_sound_data());
-                    // println!("{:?}", audio_buffer);
-                    // break;
-
-                    let packet = ffmpeg::codec::packet::Packet::borrow(&audio_buffer);
-                    let mut frame = ffmpeg::util::frame::Audio::empty();
-                    let result = decoder.decode(&packet, &mut frame).unwrap();
-                    let mut duration: i64 = 0;
-                    if result {
-                        duration = (1000_000. * frame.samples() as f64 / frame.rate() as f64) as i64;
-                        // println!("{:?}", (frame.channels(), frame.rate(), frame.samples(), duration));
-                    }
+                    let duration: i64 = (1000. * tag.get_sound_frame_duration(asc.as_ref().unwrap())) as i64;
                     info.push(TagProfile::new_audio(id, tag.get_timestamp() as i64 * 1000, position, false, duration));
                 }
             },
@@ -208,11 +196,14 @@ fn get_info(path: &str) -> (FLVInfo, u32) {
         };
         id += 1;
     }
-    println!("scan complete!\r");
-    return (info, asc.unwrap().get_sample_rate());
+    eprintln!("scan complete!\r");
+    match asc {
+        None => Err("asc is none.".to_string()),
+        Some(asc) => Ok((info, asc.get_sample_rate(), asc.channel_config))
+    }
 }
 
-fn top_duration(pairs: &BTreeMap<i64, u64>) -> i64 {
+fn _top_duration(pairs: &BTreeMap<i64, u64>) -> i64 {
     let mut list: Vec<(&i64, &u64)> = pairs.iter().collect();
     match list.len() {
         0 => 0,
@@ -224,13 +215,52 @@ fn top_duration(pairs: &BTreeMap<i64, u64>) -> i64 {
     }
 }
 
-fn check_offset(info: &mut FLVInfo) -> bool {
+#[repr(C)]
+pub struct OffsetInfo {
+    id_from: libc::uint64_t,
+    tm_from: libc::int64_t,
+    id_to: libc::uint64_t,
+    tm_to: libc::int64_t,
+    current_offset: libc::int64_t,
+    total_offset: libc::int64_t,
+}
+
+impl Encodable for OffsetInfo {
+    fn encode<S: Encoder>(&self, s: &mut S) -> Result<(), S::Error> {
+        s.emit_struct("OffsetInfo", 6, |s| {
+            try!(s.emit_struct_field("id_from", 0, |s| {
+                s.emit_u64(self.id_from)
+            }));
+            try!(s.emit_struct_field("tm_from", 1, |s| {
+                s.emit_i64(self.tm_from)
+            }));
+            try!(s.emit_struct_field("id_to", 2, |s| {
+                s.emit_u64(self.id_to)
+            }));
+            try!(s.emit_struct_field("tm_to", 3, |s| {
+                s.emit_i64(self.tm_to)
+            }));
+            try!(s.emit_struct_field("current_offset", 4, |s| {
+                s.emit_i64(self.current_offset)
+            }));
+            try!(s.emit_struct_field("total_offset", 5, |s| {
+                s.emit_i64(self.total_offset)
+            }));
+            Ok(())
+        })
+    }
+}
+
+fn check_offset(info: &mut FLVInfo) -> (Vec<OffsetInfo>, i64, i64) {
 
     let mut last_id: u64 = 0;
     let mut last_tm_us: i64 = 0;
     let mut last_dd_us: i64 = 0;
     let mut audio_duration_us: i64 = 0;
-    let mut has_gap: bool = false;
+    // let mut has_gap: bool = false;
+    let mut offset_infos: Vec<OffsetInfo> = Vec::new();
+    let mut audio_tag_count: i64 = 0;
+
     for item in info.iter().filter(|&&TagProfile { ref tag_type, sequence_header: ref sh, ..}| *tag_type == FLVTagType::TAG_TYPE_AUDIO && !*sh) {
         let &TagProfile {
             ref id,
@@ -240,15 +270,35 @@ fn check_offset(info: &mut FLVInfo) -> bool {
         } = item;
         let delta: i64 = *tm - (last_tm_us + last_dd_us);
         if delta.abs() > 1000 {
-            has_gap = true;
-            println!("{:>6} {} -> {:>6} {} {:>8} {:>8}", last_id, format_seconds_ms(last_tm_us as u64 / 1000), *id, format_seconds_ms(*tm as u64 / 1000), delta, *tm - audio_duration_us);
+            // has_gap = true;
+            eprintln!("{:>6} {} -> {:>6} {} {:>8} {:>8}", last_id, format_seconds_ms(last_tm_us as u64 / 1000), *id, format_seconds_ms(*tm as u64 / 1000), delta, *tm - audio_duration_us);
+            offset_infos.push( OffsetInfo {
+                id_from: last_id,
+                tm_from: last_tm_us,
+                id_to: *id,
+                tm_to: *tm,
+                current_offset: delta,
+                total_offset: *tm - audio_duration_us,
+            });
         }
         audio_duration_us += *dd;
         last_id = *id;
         last_dd_us = *dd;
         last_tm_us = *tm;
+        audio_tag_count += 1;
     }
-    return has_gap;
+    let count = offset_infos.len() as i64;
+    (offset_infos, count, audio_tag_count)
+}
+
+fn offset_analysis(offset_infos: &Vec<OffsetInfo>) -> (i64, i64) {
+    offset_infos.iter().fold((0, 0), |(max_offset, sum_offset), &OffsetInfo { current_offset: ref off, total_offset: ref total, .. }| {
+        (if max_offset.abs() < (*total).abs() {
+            *total
+        } else {
+            max_offset
+        } , sum_offset + (*off).abs())
+    })
 }
 
 fn get_fix_info(info: FLVInfo) -> FLVInfo {
@@ -333,7 +383,7 @@ fn get_fix_info(info: FLVInfo) -> FLVInfo {
                     }
                 }
             }
-            println!("gap {:>6} {:>6} {:>6}", gap_left, gap_right, -delta);
+            eprintln!("gap {:>6} {:>6} {:>6}", gap_left, gap_right, -delta);
             timeline_offset += delta;
         }
         timeline_decode_duration = *decode_duration_us;
@@ -347,10 +397,10 @@ fn get_fix_info(info: FLVInfo) -> FLVInfo {
     }
 
     // for (ref k, ref v) in delete_flags.iter() {
-    //     println!("del vtag {:>6}", k);
+    //     eprintln!("del vtag {:>6}", k);
     // }
     
-    println!("before delete by gop, {} tags would be deleted", v_tags.iter().filter(|t| t.deleted).count());
+    eprintln!("before delete by gop, {} tags would be deleted", v_tags.iter().filter(|t| t.deleted).count());
     // del a gop when on frame has been deleted
 
     let mut for_delete_indices: Vec<usize> = vec![];
@@ -379,7 +429,7 @@ fn get_fix_info(info: FLVInfo) -> FLVInfo {
         for_delete_indices.append(&mut gop);
     }
 
-    println!("after delete by gop, {} tags would be deleted", for_delete_indices.len());
+    eprintln!("after delete by gop, {} tags would be deleted", for_delete_indices.len());
 
     for i in for_delete_indices.into_iter() {
         v_tags[i].deleted = true;
@@ -466,7 +516,7 @@ fn get_fix_info2(info: FLVInfo, mute_tag: TagProfile, offset_mode: bool) -> FLVI
                     b_tags.push(mute_tag.clone().with_timestamp_us(gap_left_us));
                     gap_left_us += *mute_tag_dd_us;
                 }
-                loop {
+                while j < v_tags.len() {
                     let TagProfile {
                         timestamp_us: ref tm,
                         ref mut offset_us,
@@ -488,11 +538,11 @@ fn get_fix_info2(info: FLVInfo, mute_tag: TagProfile, offset_mode: bool) -> FLVI
                         gap_left_us += *mute_tag_dd_us;
                     }
                     if gap_right_us - gap_left_us > 1000 {
-                        println!("remain offset {} {:>3}", format_seconds_ms(*tm as u64 / 1000), gap_right_us - gap_left_us);
+                        eprintln!("remain offset {} {:>3}", format_seconds_ms(*tm as u64 / 1000), gap_right_us - gap_left_us);
                     }
                 } else {
                     // 非 offset 模式, overlay 不能消除
-                    println!("overlay at {} {}", format_seconds_ms(*tm as u64 / 1000), gap_left_us - gap_right_us);
+                    eprintln!("overlay at {} {}", format_seconds_ms(*tm as u64 / 1000), gap_left_us - gap_right_us);
                 }
                 // gap accumulate
                 delta_acc += gap_right_us - gap_left_us;
@@ -500,7 +550,7 @@ fn get_fix_info2(info: FLVInfo, mute_tag: TagProfile, offset_mode: bool) -> FLVI
                     b_tags.push(mute_tag.clone().with_timestamp_us(gap_left_us));
                     gap_left_us += *mute_tag_dd_us;
                     delta_acc -= *mute_tag_dd_us;
-                    println!("accumulate gap fixed.");
+                    eprintln!("accumulate gap fixed.");
                 }
             }
         }
@@ -554,7 +604,7 @@ fn get_fix_info2(info: FLVInfo, mute_tag: TagProfile, offset_mode: bool) -> FLVI
         }
     }
 
-    println!("b_tags len {}", b_tags.len());
+    eprintln!("b_tags len {}", b_tags.len());
     // mux profiles
     let mut new_profiles: Vec<TagProfile> = vec![];
     new_profiles.append(&mut a_tags);
@@ -565,34 +615,53 @@ fn get_fix_info2(info: FLVInfo, mute_tag: TagProfile, offset_mode: bool) -> FLVI
     return c_tags;
 }
 
-fn fix_file(input: &str, output: &str, info: FLVInfo) {
+fn fix_file(input: &str, output: &str, info: FLVInfo) -> Result<(), String> {
 
-    use std::io::SeekFrom::{Current, Start};
+    // use std::io::SeekFrom::{Current, Start};
+    {
+        // do some guard
+        // avc sequence header must be 1
+        // aac sequence header must be 1
+        // metadata must be 1 or 0
+        let a_sh_len = info.iter().filter(|&&TagProfile { ref tag_type, sequence_header: ref sh, .. }| *tag_type == FLVTagType::TAG_TYPE_AUDIO && *sh).count();
+        if a_sh_len != 1 {
+            return Err(format!("audio sequence header tag count is not 1 but {}.", a_sh_len));
+        }
+        let v_sh_len = info.iter().filter(|&&TagProfile { ref tag_type, sequence_header: ref sh, .. }| *tag_type == FLVTagType::TAG_TYPE_VIDEO && *sh).count();
+        if v_sh_len != 1 {
+            return Err(format!("video sequence header tag count is not 1 but {}.", v_sh_len));
+        }
+        let m_len = info.iter().filter(|&&TagProfile { ref tag_type, .. }| *tag_type == FLVTagType::TAG_TYPE_SCRIPTDATAOBJECT).count();
+        if m_len > 1 {
+            return Err(format!("metadata tag count is not 0 or 1 but {}.", m_len));
+        }
+    }
 
-    let mut file = File::open(input).unwrap();
-    let file_info = file.metadata().unwrap();
-    let file_len = file_info.len();
+    let mut file = File::open(input).map_err(|e| format!("open input file err: {}", e))?;
+    // let file_info = file.metadata().unwrap();
+    // let file_len = file_info.len();
     
-    let mut output_file: File = File::create(output).unwrap();
+    let output_file: File = File::create(output).map_err(|e| format!("creat output file err: {}", e))?;
     let mut tag_write: FLVTagWrite<File> = FLVTagWrite::new(output_file);
 
     let header = FLVHeader::read(&mut file);
     tag_write.write_header(&header);
 
     // function from flv-split
-    fn write_back_meta_tag<T: Write + Seek>(duration: u64, metatag: &mut FLVTag, times: &Vec<u64>, filepositions: &Vec<u64>, tag_write: &mut FLVTagWrite<T>) {
+    fn write_back_meta_tag<T: Write + Seek>(duration: u64, metatag: &mut FLVTag, times: &Vec<u64>, filepositions: &Vec<u64>, tag_write: &mut FLVTagWrite<T>) -> Result<(), String> {
         let mut metas = metatag.get_objects();
         {
-            metas[1].as_object_mut().unwrap().insert("duration".to_string(), Json::F64(duration as f64 / 1000.0));
+            metas[1].as_object_mut().ok_or("meta[1] is not object.".to_string())?.insert("duration".to_string(), Json::F64(duration as f64 / 1000.0));
             metas[1].as_object_mut().unwrap().insert("gapfixedby".to_string(), Json::String(PROGRAM_SIGN.to_string()));
             let key_times = Json::Array(times.iter().map(|&t| Json::F64(t as f64 / 1000.0)).collect::<Vec<Json>>());
             let key_positions = Json::Array(filepositions.iter().map(|&p| Json::F64(p as f64)).collect::<Vec<Json>>());
-            let keyframes = metas[1].as_object_mut().unwrap().get_mut("keyframes").unwrap().as_object_mut().unwrap();
+            let keyframes = metas[1].as_object_mut().unwrap().get_mut("keyframes").ok_or("meta[1].keyframes dose not exits.".to_string())?.as_object_mut().ok_or("meta[1].keyframes is not object.".to_string())?;
             keyframes.insert("times".to_string(), key_times);
             keyframes.insert("filepositions".to_string(), key_positions);
         }
         metatag.set_objects(&metas);
         tag_write.write_meta_tag(&metatag);
+        Ok(())
     }
 
     // create metatag
@@ -600,14 +669,23 @@ fn fix_file(input: &str, output: &str, info: FLVInfo) {
         .filter(|&&TagProfile { ref tag_type, ref keyframe, .. }| *tag_type == FLVTagType::TAG_TYPE_VIDEO && *keyframe )
         .map(|&TagProfile { timestamp_us: ref t, .. }| *t as u64 / 1000).collect::<Vec<u64>>();
     let mut positions: Vec<u64> = vec![0u64; times.len()];
-    let mut metatag = info.iter().find(|&&TagProfile { ref tag_type, .. }| *tag_type == FLVTagType::TAG_TYPE_SCRIPTDATAOBJECT).unwrap().tag(&mut file);
+    let mut metatag = info.iter().find(|&&TagProfile { ref tag_type, .. }| *tag_type == FLVTagType::TAG_TYPE_SCRIPTDATAOBJECT).map(|item| item.tag(&mut file));
     let duration = {
-        let item = info.iter().filter(|&&TagProfile { ref tag_type, .. }| *tag_type == FLVTagType::TAG_TYPE_AUDIO).last().unwrap();
+        let item = info.iter().filter(|&&TagProfile { ref tag_type, .. }| *tag_type == FLVTagType::TAG_TYPE_AUDIO).last().ok_or("no any audio tags.".to_string())?;
         (item.timestamp_us + item.decode_duration_us) as u64 / 1000
     };
 
-    // write metatag
-    write_back_meta_tag(duration, &mut metatag, &times, &positions, &mut tag_write);
+    if metatag.is_some() {
+        // write metatag
+        match write_back_meta_tag(duration, metatag.as_mut().unwrap(), &times, &positions, &mut tag_write) {
+            Ok(_) => {},
+            Err(msg) => {
+                eprintln!("write metatag err, but fix is proceeding: {}", msg);
+            }
+        };
+    } else {
+        eprintln!("can't find metatag, but fix is proceeding.");
+    }
 
     let mut frame_index: usize = 0;
 
@@ -637,22 +715,68 @@ fn fix_file(input: &str, output: &str, info: FLVInfo) {
         tag_write.write_tag(&tag);
     }
 
-    // write metatag
-    write_back_meta_tag(duration, &mut metatag, &times, &positions, &mut tag_write);
+    if metatag.is_some() {
+        // write metatag
+        match write_back_meta_tag(duration, metatag.as_mut().unwrap(), &times, &positions, &mut tag_write) {
+            Ok(_) => {},
+            Err(msg) => {
+                eprintln!("write metatag err, but fix is proceeding: {}", msg);
+            }
+        };
+    }
+    Ok(())
 }
 
 fn print_usage(program: &str, opts: Options) {
     let brief = format!("Usage: {} FILE [options]", program);
-    print!("{}", opts.usage(&brief));
+    write!(std::io::stderr(), "{}", opts.usage(&brief)).unwrap();
+}
+
+fn return_code(code: i32, output: bool, msg: Option<&str>, data: Option<(Vec<OffsetInfo>, i64, i64, i64, i64)>, need_fix: Option<bool>) -> i32 {
+
+    let mut out = std::io::stdout();
+    write!(out, "{{\"code\": {}", code).unwrap();
+    write!(out, ", \"output\": {}", output).unwrap();
+    if msg.is_some() {
+        write!(out, ", \"message\": {}", rustc_serialize::json::encode(msg.as_ref().unwrap()).unwrap()).unwrap();
+    }
+    match data {
+        Some((infos, max_offset, sum_offset, offset_tag_count, audio_tag_count)) => {
+            write!(out, ", \"data\": {}", rustc_serialize::json::encode(&infos).unwrap()).unwrap();
+            write!(out, ", \"max_offset\": {}", max_offset).unwrap();
+            write!(out, ", \"sum_offset\": {}", sum_offset).unwrap();
+            write!(out, ", \"offset_tag_count\": {}", offset_tag_count).unwrap();
+            write!(out, ", \"audio_tag_count\": {}", audio_tag_count).unwrap();
+            write!(out, ", \"offset_rate\": {}", offset_tag_count as f64 / audio_tag_count as f64).unwrap();
+        }
+        _ => {}
+    };
+    match need_fix {
+        Some(nf) => {
+            write!(out, ", \"need_fix\": {}", nf).unwrap();
+        }
+        _ => {}
+    }
+    write!(out, "}}\n").unwrap();
+    return code;
 }
 
 fn main() {
+    let ret: i32 = app();
+    if ret == -1 {
+        std::process::exit(ret);
+    }
+}
+
+fn app() -> i32 {
     
     let args: Vec<String> = std::env::args().collect();
     let program = args[0].clone();
 
     let mut opts = Options::new();
     opts.optflagopt("o", "output", "output flv file", "OUTPUT");
+    opts.optflagopt("t", "threshold", "when in fix mode, only max_offset > threshold would be fixed, in microseconds, default 0", "THRESHOLD");
+    opts.optflagopt("r", "offset_rate_threshold", "when in fix mode, only offset_rate < offset_rate_threshold would be fixed, in 0-1, double number, default 0.01", "OFFSET_RATE");
     opts.optflag("d", "drop-video", "fix audio gap by drop video frames");
     opts.optflag("b", "fill-mute-audio", "fix audio gap by fill mute audio frames");
     opts.optflag("f", "offset", "fill mute audio, also offset video frame to avoid gap");
@@ -662,28 +786,29 @@ fn main() {
     let matches: getopts::Matches = match opts.parse(&args[1..]) {
         Ok(m) => m,
         Err(f) => {
-            panic!(f.to_string())
+            // panic!(f.to_string())
+            return return_code(-1, false, Some(&f.to_string()), None, None);
         }
     };
 
     if matches.opt_present("h") {
         print_usage(&program, opts);
-        return;
+        return return_code(-1, false, None, None, None);
     }
 
     let input: String = if !matches.free.is_empty() {
         matches.free[0].clone()
     } else {
-        println!("no input file.");
+        eprintln!("no input file.");
         print_usage(&program, opts);
-        return;
+        return return_code(-1, false, None, None, None);
     };
 
     let input_path: &Path = Path::new(&input);
     if !input_path.exists() {
-        println!("input file does not exist.");
+        eprintln!("input file does not exist.");
         print_usage(&program, opts);
-        return;
+        return return_code(-1, false, None, None, None);
     }
 
     let output = match matches.opt_default("o", "") {
@@ -696,35 +821,154 @@ fn main() {
                 i += 1;
                 output = input_path.with_file_name(format!("{}-fixed({}).flv", &file, i));
             }
-            println!("no output file, use {}", output.to_str().unwrap());
+            eprintln!("no output file, use {}", output.to_str().unwrap());
             output.to_string_lossy().to_string()
         }
     };
 
-    let verbose     = matches.opt_present("v");
+    let _verbose    = matches.opt_present("v");
     let drop_mode   = matches.opt_present("d");
     let fill_mode   = matches.opt_present("b");
     let offset_mode = matches.opt_present("f");
+    let fix_mode    = drop_mode || fill_mode || offset_mode;
 
-    println!("checking flv file: {}", input);
-    let (mut info, sample_rate) = get_info(&input);
-    let has_gap = check_offset(&mut info);
+    let mut has_threshold: bool = false;
+    let threshold = match matches.opt_default("t", "0") {
+        Some(t) => {
+            has_threshold = true;
+            match i64::from_str_radix(&t, 10) {
+                Ok(i) => i.abs(),
+                Err(e) => {
+                    if fix_mode { // fix mode
+                        eprintln!("param threshold parse err: {}, use default 0.", e);
+                    }
+                    0
+                }
+            }
+        },
+        _ => {
+            0
+        }
+    };
 
-    let fix: bool = drop_mode || fill_mode;
+    let offset_rate_threshold = match matches.opt_default("r", "0.01") {
+        Some(t) => {
+            has_threshold = true;
+            match f64::from_str(&t) {
+                Ok(f) => f,
+                Err(e) => {
+                    if fix_mode {
+                        eprintln!("param offset_rate_threshold parse err: {}, use default 0.01", e);
+                    }
+                    0.01_f64
+                }
+            }
+        },
+        _ => {
+            0.01_f64
+        }
+    };
+
+    eprintln!("checking flv file: {}", input);
+    let (mut info, sample_rate, channels) = match get_info(&input) {
+        Ok(ret) => ret,
+        Err(msg) => {
+            eprintln!("{}", msg);
+            return return_code(-1, false, Some(&msg), None, None);
+        }
+    };
+    let (offset_infos, offset_tag_count, audio_tag_count) = check_offset(&mut info);
+    let offset_rate = offset_tag_count as f64 / audio_tag_count as f64;
+    let has_gap = offset_infos.len() != 0;
+
+    let mut need_fix: Option<bool> = None;
     if has_gap {
-        if fix {
+        let (max_offset, sum_offset) = offset_analysis(&offset_infos);
+        if has_threshold {
+            need_fix = Some(max_offset.abs() > threshold && offset_rate <= offset_rate_threshold);
+        }
+        eprintln!("max_offset: {}, sum_offset: {}, offset_rate: {:.6}, offset_rate_threshold: {:.6}", max_offset, sum_offset, offset_rate, offset_rate_threshold);
+        if fix_mode {
+            if max_offset.abs() < threshold {
+                let msg = format!("max_offset(abs({})) < threshold({}), no fix.", max_offset, threshold);
+                eprintln!("{}", msg);
+                return return_code(1, false, Some(&msg), Some((offset_infos, max_offset, sum_offset, offset_tag_count, audio_tag_count)), need_fix); 
+            }
+            if offset_rate > offset_rate_threshold {
+                let msg = format!("offset_rate({}) < offset_rate_threshold({}), no fix.", offset_rate, offset_rate_threshold);
+                eprintln!("{}", msg);
+                return return_code(1, false, Some(&msg), Some((offset_infos, max_offset, sum_offset, offset_tag_count, audio_tag_count)), need_fix); 
+            }
             let new_info = if drop_mode {
                 get_fix_info(info)
             } else {
-                // println!("{:?}", (TagProfile::new_mute_tag(0)));
-                get_fix_info2(info, TagProfile::new_mute(0, sample_rate), offset_mode)
+                // eprintln!("{:?}", (TagProfile::new_mute_tag(0)));
+                get_fix_info2(info, TagProfile::new_mute(0, sample_rate, channels), offset_mode)
             };
-            fix_file(&input, &output, new_info);
-            println!("flv fix complete.\nplease use `ffmpeg -i \"{}\" -acodec copy -vcodec copy \"{}\"` to get mp4 file.", &output, Path::new(&output).with_extension("mp4").to_str().unwrap());
+            match fix_file(&input, &output, new_info) {
+                Ok(_) => {
+                    eprintln!("flv fix complete.\nplease use `ffmpeg -i \"{}\" -acodec copy -vcodec copy \"{}\"` to get mp4 file.", &output, Path::new(&output).with_extension("mp4").to_str().unwrap());
+                    return return_code(1, true, None, Some((offset_infos, max_offset, sum_offset, offset_tag_count, audio_tag_count)), need_fix);
+                }
+                Err(msg) => {
+                    eprintln!("fix flv file err: {}", msg);
+                    return return_code(-1, false, Some(&msg), None, need_fix);
+                }
+            };
         } else {
-            println!("there are audio gaps, please set the fix mode (-b or -d) to fix them.");
+            eprintln!("there are audio gaps, please set the complete fix mode (-b -f) to fix them.");
+            return return_code(1, false, None, Some((offset_infos, max_offset, sum_offset, offset_tag_count, audio_tag_count)), need_fix);
         }
     } else {
-        println!("no gap.");
+        eprintln!("no gap.");
+        return return_code(0, false, None, None, need_fix);
     }
+}
+
+#[no_mangle]
+pub extern fn check(input_str: *const libc::c_char) -> *mut libc::c_char {
+    use std::ffi::{ CStr, CString };
+    use std::fmt::Write;
+
+    fn code(c: i32, msg: Option<&str>, data: Option<Vec<OffsetInfo>>) -> *mut libc::c_char {
+        let mut out: String = String::new();
+        write!(out, "{{ \"code\": {}", c).unwrap();
+        if msg.is_some() {
+            write!(out, ", \"message\": {}", rustc_serialize::json::encode(msg.as_ref().unwrap()).unwrap()).unwrap();
+        }
+        if data.is_some() {
+            write!(out, ", \"data\": {}", rustc_serialize::json::encode(&data).unwrap()).unwrap();
+        }
+        write!(out, "}}").unwrap();
+        CString::new(out).unwrap().into_raw()
+    }
+
+    let input_cstr = unsafe {
+        assert!(!input_str.is_null());
+        CStr::from_ptr(input_str)
+    };
+    let input: String = input_cstr.to_string_lossy().to_string();
+    let input_path: &Path = Path::new(&input);
+    if !input_path.exists() {
+        return code(-1, Some("input file does not exist."), None);
+    }
+
+    let (mut info, _sample_rate, _) = match get_info(&input) {
+        Ok(ret) => ret,
+        Err(msg) => {
+            return code(-1, Some(&msg), None);
+        }
+    };
+    let (offset_infos, _, _) = check_offset(&mut info);
+    code(if offset_infos.len() == 0 { 0 } else { 1 }, None, Some(offset_infos))
+}
+
+#[no_mangle]
+pub extern fn check_free(ret: *mut libc::c_char) {
+    use std::ffi::CString;
+
+    unsafe {
+        if ret.is_null() { return }
+        CString::from_raw(ret)
+    };
 }
