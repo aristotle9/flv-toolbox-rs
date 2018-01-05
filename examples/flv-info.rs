@@ -38,19 +38,30 @@ fn flv_info(path: &String, show_meta: bool, all_frame: bool, video_frame: bool, 
     use std::fs::File;
     use std::path::Path;
     use std::fs;
+    use std::io::{ Read, self };
+    
+    let mut source: Box<Read>;
+    let mut parser: FLVTagRead<Box<Read>>;
 
-    let path = Path::new(path);
-    if fs::metadata(path).is_err() {
-        panic!(format!("file dosen't exist: {}", path.display()));
+    if path == "-" { // stdin
+        println!("show info for stdin");
+        source = Box::new(io::stdin()) as Box<Read>;
+        parser = FLVTagRead::new(&mut source);
+    } else {
+        let path = Path::new(path);
+        if fs::metadata(path).is_err() {
+            panic!(format!("file dosen't exist: {}", path.display()));
+        }
+        else {
+            println!("show info for {}", path.display());
+        }
+        let mut file = File::open(path).unwrap();
+        let file_meta = file.metadata().unwrap();
+        let file_size = file_meta.len();
+        println!("file size: {}", file_size);
+        source = Box::new(file) as Box<Read>;
+        parser = FLVTagRead::new(&mut source);//header has read
     }
-    else {
-        println!("show info for {}", path.display());
-    }
-    let mut file = File::open(path).unwrap();
-    let file_meta = file.metadata().unwrap();
-    let file_size = file_meta.len();
-    println!("file size: {}", file_size);
-    let mut parser = FLVTagRead::new(&mut file);//header has read
 
     println!("\r\ntags: kf: key_frame cd: codec_id pt: packet_type", );
     if audio_frame {
