@@ -220,8 +220,8 @@ impl From<u8> for FLVTagType {
 }
 
 pub struct FLVHeader {
-    hasAudioTags: bool,
-    hasVideoTags: bool,
+    pub hasAudioTags: bool,
+    pub hasVideoTags: bool,
 }
 
 impl FLVHeader {
@@ -538,10 +538,10 @@ impl FLVTag {
 
 #[derive(Debug, Clone)]
 pub struct AudioSpecificConfig {
-    original_audio_object_type: u8,
-    audio_object_type: u8,
-    sample_index: u8,
-    channel_config: u8,
+    pub original_audio_object_type: u8,
+    pub audio_object_type: u8,
+    pub sample_index: u8,
+    pub channel_config: u8,
 }
 
 impl AudioSpecificConfig {
@@ -551,30 +551,30 @@ impl AudioSpecificConfig {
     }
 }
 
-const SOUND_FORMAT_LINEAR: u8 = 0;
-const SOUND_FORMAT_ADPCM: u8 = 1;
-const SOUND_FORMAT_MP3: u8 = 2;
-const SOUND_FORMAT_LINEAR_LE: u8 = 3;
-const SOUND_FORMAT_NELLYMOSER_16K: u8 = 4;
-const SOUND_FORMAT_NELLYMOSER_8K: u8 = 5;
-const SOUND_FORMAT_NELLYMOSER: u8 = 6;
-const SOUND_FORMAT_G711A: u8 = 7;
-const SOUND_FORMAT_G711U: u8 = 8;
-const SOUND_FORMAT_AAC: u8 = 10;
-const SOUND_FORMAT_SPEEX: u8 = 11;
-const SOUND_FORMAT_MP3_8K: u8 = 14;
-const SOUND_FORMAT_DEVICE_SPECIFIC: u8 = 15;
+pub const SOUND_FORMAT_LINEAR: u8 = 0;
+pub const SOUND_FORMAT_ADPCM: u8 = 1;
+pub const SOUND_FORMAT_MP3: u8 = 2;
+pub const SOUND_FORMAT_LINEAR_LE: u8 = 3;
+pub const SOUND_FORMAT_NELLYMOSER_16K: u8 = 4;
+pub const SOUND_FORMAT_NELLYMOSER_8K: u8 = 5;
+pub const SOUND_FORMAT_NELLYMOSER: u8 = 6;
+pub const SOUND_FORMAT_G711A: u8 = 7;
+pub const SOUND_FORMAT_G711U: u8 = 8;
+pub const SOUND_FORMAT_AAC: u8 = 10;
+pub const SOUND_FORMAT_SPEEX: u8 = 11;
+pub const SOUND_FORMAT_MP3_8K: u8 = 14;
+pub const SOUND_FORMAT_DEVICE_SPECIFIC: u8 = 15;
 
-const SOUND_RATE_5K : f64 = 5512.5_f64;
-const SOUND_RATE_11K: f64 = 11025_f64;
-const SOUND_RATE_22K: f64 = 22050_f64;
-const SOUND_RATE_44K: f64 = 44100_f64;
+pub const SOUND_RATE_5K : f64 = 5512.5_f64;
+pub const SOUND_RATE_11K: f64 = 11025_f64;
+pub const SOUND_RATE_22K: f64 = 22050_f64;
+pub const SOUND_RATE_44K: f64 = 44100_f64;
 
-const SOUND_SIZE_8BITS: u8 = 8;
-const SOUND_SIZE_16BITS: u8 = 16;
+pub const SOUND_SIZE_8BITS: u8 = 8;
+pub const SOUND_SIZE_16BITS: u8 = 16;
 
-const SOUND_CHANNELS_MONO: u8 = 1;
-const SOUND_CHANNELS_STEREO: u8 = 2;
+pub const SOUND_CHANNELS_MONO: u8 = 1;
+pub const SOUND_CHANNELS_STEREO: u8 = 2;
 
 impl FLVTag {
     pub fn get_sound_format(&self) -> u8 {
@@ -596,13 +596,13 @@ impl FLVTag {
     /// frame duration = num of samples / sound_rate
     /// for aac, one frame always contains 1024 samples
     /// @return in milliseconds
-    pub fn get_sound_frame_duration(&self, asc: &AudioSpecificConfig) -> u64 {
+    pub fn get_sound_frame_duration(&self, asc: &AudioSpecificConfig) -> f64 {
         assert_eq!(self.get_tag_type(), FLVTagType::TAG_TYPE_AUDIO);
         assert_eq!(self.get_sound_format(), SOUND_FORMAT_AAC);
         if self.is_acc_sequence_header() {
-            return 0;
+            return 0.;
         }
-        return (1000. * 1024. / asc.get_sample_rate() as f64) as u64;
+        return 1000. * 1024. / asc.get_sample_rate() as f64;
     }
 
     pub fn get_sound_size(&self) -> u8 {
