@@ -19,11 +19,11 @@ fn print_metatag(json: &Json) -> Result<(), Option<String>> {
     let obj = &json.as_array().ok_or(Some("arr[1] is not array".to_string()))?[1];
     println!("{}", rustc_serialize::json::as_pretty_json(&obj));
 
-    let times = obj.find_path(&["keyframes", "times"]).ok_or(None)?.as_array().ok_or(None)?;
+    let times = obj.find_path(&["keyframes", "times"]).ok_or(Some("no keyframes.times in meta".to_string()))?.as_array().ok_or(Some("keyframes.times is not an array".to_string()))?;
     let times: Vec<f64> = times.iter().map(|val: &Json| {
         val.as_f64().unwrap()
     }).collect();
-    let filepositions = obj.find_path(&["keyframes", "filepositions"]).ok_or(None)?.as_array().ok_or(None)?;
+    let filepositions = obj.find_path(&["keyframes", "filepositions"]).ok_or(Some("no keyframes.filepositions in meta".to_string()))?.as_array().ok_or(Some("keyframes.filepositions is not an array".to_string()))?;
     let filepositions: Vec<u64> = filepositions.iter().map(|val: &Json| {
         val.as_f64().unwrap() as u64
     }).collect();
