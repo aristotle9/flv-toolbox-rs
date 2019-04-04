@@ -651,13 +651,23 @@ fn fix_file(input: &str, output: &str, info: FLVInfo) -> Result<(), String> {
     fn write_back_meta_tag<T: Write + Seek>(duration: u64, metatag: &mut FLVTag, times: &Vec<u64>, filepositions: &Vec<u64>, tag_write: &mut FLVTagWrite<T>) -> Result<(), String> {
         let mut metas = metatag.get_objects();
         {
-            metas[1].as_object_mut().ok_or("meta[1] is not object.".to_string())?.insert("duration".to_string(), Json::F64(duration as f64 / 1000.0));
-            metas[1].as_object_mut().unwrap().insert("gapfixedby".to_string(), Json::String(PROGRAM_SIGN.to_string()));
-            let key_times = Json::Array(times.iter().map(|&t| Json::F64(t as f64 / 1000.0)).collect::<Vec<Json>>());
-            let key_positions = Json::Array(filepositions.iter().map(|&p| Json::F64(p as f64)).collect::<Vec<Json>>());
-            let keyframes = metas[1].as_object_mut().unwrap().get_mut("keyframes").ok_or("meta[1].keyframes dose not exits.".to_string())?.as_object_mut().ok_or("meta[1].keyframes is not object.".to_string())?;
-            keyframes.insert("times".to_string(), key_times);
-            keyframes.insert("filepositions".to_string(), key_positions);
+            // if the updating of metadata was failed, then would write back the original metadata
+            let r: Result<(), String> = (|| {
+                metas[1].as_object_mut().ok_or("meta[1] is not object.".to_string())?.insert("duration".to_string(), Json::F64(duration as f64 / 1000.0));
+                metas[1].as_object_mut().unwrap().insert("gapfixedby".to_string(), Json::String(PROGRAM_SIGN.to_string()));
+                let key_times = Json::Array(times.iter().map(|&t| Json::F64(t as f64 / 1000.0)).collect::<Vec<Json>>());
+                let key_positions = Json::Array(filepositions.iter().map(|&p| Json::F64(p as f64)).collect::<Vec<Json>>());
+                let keyframes = metas[1].as_object_mut().unwrap().get_mut("keyframes").ok_or("meta[1].keyframes dose not exits.".to_string())?.as_object_mut().ok_or("meta[1].keyframes is not object.".to_string())?;
+                keyframes.insert("times".to_string(), key_times);
+                keyframes.insert("filepositions".to_string(), key_positions);
+                Ok(())
+            })();
+            match r {
+                Ok(_) => {},
+                Err(err) => {
+                    eprintln!("update metadata error: {}", err);
+                }
+            }
         }
         metatag.set_objects(&metas);
         tag_write.write_meta_tag(&metatag);
