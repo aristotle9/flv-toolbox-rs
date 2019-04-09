@@ -3,11 +3,18 @@
 cargo build --release --example flv-info
 cargo build --release --example flv-config
 cargo build --release --example flv-split
+cargo build --release --example flv-aac-fix
+cargo build --release --example timestamp-normalization
+
 cp ./target/release/examples/flv-* ./bin/
+cp ./target/release/examples/timestamp-normalization ./bin/
+
 cargo build --release --target x86_64-unknown-linux-musl --example flv-info
 cargo build --release --target x86_64-unknown-linux-musl --example flv-aac-fix
 cargo build --release --target x86_64-unknown-linux-musl --example timestamp-normalization
+
 file target/x86_64-unknown-linux-musl/release/examples/flv-aac-fix
+
 cd target/x86_64-unknown-linux-musl/release/examples/
 zip -u ../../../../x86_64-unknown-linux-musl.zip flv-info flv-aac-fix timestamp-normalization
 cd ~-
