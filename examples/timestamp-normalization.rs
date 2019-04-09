@@ -615,7 +615,7 @@ fn get_fix_info2(info: FLVInfo, mute_tag: TagProfile, offset_mode: bool) -> FLVI
     return c_tags;
 }
 
-fn fix_file(input: &str, output: &str, info: FLVInfo, update_duration: bool) -> Result<(), String> {
+fn fix_file(input: &str, output: &str, info: FLVInfo, update_duration: bool, inject_keyframes: bool) -> Result<(), String> {
 
     // use std::io::SeekFrom::{Current, Start};
     {
@@ -648,18 +648,24 @@ fn fix_file(input: &str, output: &str, info: FLVInfo, update_duration: bool) -> 
     tag_write.write_header(&header);
 
     // function from flv-split
-    fn write_back_meta_tag<T: Write + Seek>(duration: u64, metatag: &mut FLVTag, times: &Vec<u64>, filepositions: &Vec<u64>, tag_write: &mut FLVTagWrite<T>, update_duration: bool) -> Result<(), String> {
+    fn write_back_meta_tag<T: Write + Seek>(duration: u64, metatag: &mut FLVTag, times: &Vec<u64>, filepositions: &Vec<u64>, tag_write: &mut FLVTagWrite<T>, update_duration: bool, inject_keyframes: bool) -> Result<(), String> {
         let mut metas = metatag.get_objects();
         {
             // if the updating of metadata was failed, then would write back the original metadata
             let r: Result<(), String> = (|| {
+                let root: &mut BTreeMap<String, Json> = metas[1].as_object_mut().ok_or("meta[1] is not object.".to_string())?;
                 if update_duration {
-                    metas[1].as_object_mut().ok_or("meta[1] is not object.".to_string())?.insert("duration".to_string(), Json::F64(duration as f64 / 1000.0));
+                    root.insert("duration".to_string(), Json::F64(duration as f64 / 1000.0));
                 }
-                metas[1].as_object_mut().unwrap().insert("gapfixedby".to_string(), Json::String(PROGRAM_SIGN.to_string()));
+                root.insert("gapfixedby".to_string(), Json::String(PROGRAM_SIGN.to_string()));
                 let key_times = Json::Array(times.iter().map(|&t| Json::F64(t as f64 / 1000.0)).collect::<Vec<Json>>());
                 let key_positions = Json::Array(filepositions.iter().map(|&p| Json::F64(p as f64)).collect::<Vec<Json>>());
-                let keyframes = metas[1].as_object_mut().unwrap().get_mut("keyframes").ok_or("meta[1].keyframes dose not exits.".to_string())?.as_object_mut().ok_or("meta[1].keyframes is not object.".to_string())?;
+                let keyframes = {
+                    if inject_keyframes {
+                        root.entry("keyframes".to_string()).or_insert(Json::Object(BTreeMap::new()));
+                    }
+                    root.get_mut("keyframes").ok_or("meta[1].keyframes dose not exits.".to_string())?.as_object_mut().ok_or("meta[1].keyframes is not object.".to_string())?
+                };
                 keyframes.insert("times".to_string(), key_times);
                 keyframes.insert("filepositions".to_string(), key_positions);
                 Ok(())
@@ -689,7 +695,7 @@ fn fix_file(input: &str, output: &str, info: FLVInfo, update_duration: bool) -> 
 
     if metatag.is_some() {
         // write metatag
-        match write_back_meta_tag(new_duration, metatag.as_mut().unwrap(), &times, &positions, &mut tag_write, update_duration) {
+        match write_back_meta_tag(new_duration, metatag.as_mut().unwrap(), &times, &positions, &mut tag_write, update_duration, inject_keyframes) {
             Ok(_) => {},
             Err(msg) => {
                 eprintln!("write metatag err, but fix is proceeding: {}", msg);
@@ -729,7 +735,7 @@ fn fix_file(input: &str, output: &str, info: FLVInfo, update_duration: bool) -> 
 
     if metatag.is_some() {
         // write metatag
-        match write_back_meta_tag(new_duration, metatag.as_mut().unwrap(), &times, &positions, &mut tag_write, update_duration) {
+        match write_back_meta_tag(new_duration, metatag.as_mut().unwrap(), &times, &positions, &mut tag_write, update_duration, inject_keyframes) {
             Ok(_) => {},
             Err(msg) => {
                 eprintln!("write metatag err, but fix is proceeding: {}", msg);
@@ -793,6 +799,7 @@ fn app() -> i32 {
     opts.optflag("b", "fill-mute-audio", "fix audio gap by fill mute audio frames");
     opts.optflag("f", "offset", "fill mute audio, also offset video frame to avoid gap");
     opts.optflag("u", "duration", "update duration field in metadata, by adding the last audio frame's timestamp and its duration");
+    opts.optflag("j", "inject", "inject keyframes infomation if it is not exist");
     opts.optflag("v", "verbose", "show more information");
     opts.optflag("h", "help", "print this help menu");
 
@@ -845,6 +852,7 @@ fn app() -> i32 {
     let offset_mode = matches.opt_present("f");
     let fix_mode    = drop_mode || fill_mode || offset_mode;
     let update_duration = matches.opt_present("u");
+    let inject_keyframes = matches.opt_present("j");
 
     let mut has_threshold: bool = false;
     let threshold = match matches.opt_default("t", "0") {
@@ -919,7 +927,7 @@ fn app() -> i32 {
                 // eprintln!("{:?}", (TagProfile::new_mute_tag(0)));
                 get_fix_info2(info, TagProfile::new_mute(0, sample_rate, channels), offset_mode)
             };
-            match fix_file(&input, &output, new_info, update_duration) {
+            match fix_file(&input, &output, new_info, update_duration, inject_keyframes) {
                 Ok(_) => {
                     eprintln!("flv fix complete.\nplease use `ffmpeg -i \"{}\" -acodec copy -vcodec copy \"{}\"` to get mp4 file.", &output, Path::new(&output).with_extension("mp4").to_str().unwrap());
                     return return_code(1, true, None, Some((offset_infos, max_offset, sum_offset, offset_tag_count, audio_tag_count)), need_fix);
